@@ -32,6 +32,8 @@ router.get('/overview', auth, allowRoles('admin', 'reseller', 'client'), async (
     const totalFailed = campaigns.reduce((s, c) => s + (c.failedCount || 0), 0);
     const completed = campaigns.filter((c) => c.status === 'completed').length;
     const running = campaigns.filter((c) => c.status === 'running').length;
+    const inProcess = campaigns.filter((c) => ['running', 'queued'].includes(c.status)).length;
+    const pending = campaigns.filter((c) => ['draft', 'scheduled'].includes(c.status)).length;
 
     res.json({
       overview: {
@@ -40,10 +42,46 @@ router.get('/overview', auth, allowRoles('admin', 'reseller', 'client'), async (
         totalFailed,
         completed,
         running,
+        inProcess,
+        pending,
         userCount: user.role === 'client' ? undefined : userCount,
         activeNumbers: user.role === 'admin' ? numberCount : undefined,
       },
       creditBalance: user.creditBalance,
+      normalCredit: user.creditBalance ?? 0,
+      rBtnCredit: user.rBtnCredit ?? 0,
+      actionBtnCredit: user.actionBtnCredit ?? 0,
+      btnSmsCredit: user.btnSmsCredit ?? 0,
+      apiDaysCredit: user.apiDaysCredit ?? 0,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+router.get('/admin-dashboard', auth, allowRoles('admin'), async (req, res) => {
+  try {
+    const [campaignCounts, userDoc] = await Promise.all([
+      Campaign.aggregate([
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+      User.findById(req.user._id).lean(),
+    ]);
+
+    const statusCounts = Object.fromEntries((campaignCounts || []).map((c) => [c._id, c.count]));
+    const totalCampaign = (campaignCounts || []).reduce((s, c) => s + c.count, 0);
+    const inProcessCampaigns = (statusCounts.running || 0) + (statusCounts.queued || 0);
+    const pendingCampaigns = (statusCounts.draft || 0) + (statusCounts.scheduled || 0);
+
+    res.json({
+      normalCredit: userDoc?.creditBalance ?? 0,
+      rBtnCredit: userDoc?.rBtnCredit ?? 0,
+      actionBtnCredit: userDoc?.actionBtnCredit ?? 0,
+      btnSmsCredit: userDoc?.btnSmsCredit ?? 0,
+      apiDaysCredit: userDoc?.apiDaysCredit ?? 0,
+      totalCampaign,
+      inProcessCampaigns,
+      pendingCampaigns,
     });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });

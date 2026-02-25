@@ -7,6 +7,10 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: ['admin', 'reseller', 'client'], required: true },
     resellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     creditBalance: { type: Number, default: 0 },
+    rBtnCredit: { type: Number, default: 0 },
+    actionBtnCredit: { type: Number, default: 0 },
+    btnSmsCredit: { type: Number, default: 0 },
+    apiDaysCredit: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

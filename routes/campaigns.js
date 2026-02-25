@@ -2,11 +2,22 @@ const express = require('express');
 const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
 const campaignService = require('../services/campaignService');
+const { validateNumbers } = require('../utils/validateNumbers');
 const { auth } = require('../middleware/auth');
 const { allowRoles } = require('../middleware/rbac');
 const { validateCampaignBody, validateMongoId } = require('../middleware/validate');
 
 const router = express.Router();
+
+router.post('/validate-numbers', auth, allowRoles('admin', 'reseller', 'client'), (req, res) => {
+  try {
+    const rows = Array.isArray(req.body) ? req.body : req.body?.numbers || req.body?.recipients || [];
+    const result = validateNumbers(rows);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
 
 const canAccessCampaign = (campaign, user) => {
   if (user.role === 'admin') return true;
@@ -103,6 +114,37 @@ router.post('/:id/pause', auth, allowRoles('admin', 'reseller', 'client'), valid
   try {
     const result = await campaignService.pause(req.params.id, req.user);
     res.json(result);
+  } catch (err) {
+    if (err.message === 'Campaign not found') return res.status(404).json({ message: err.message });
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+router.get('/:id/export', auth, allowRoles('admin', 'reseller', 'client'), validateMongoId('id'), async (req, res) => {
+  try {
+    const { getCampaignWithAccess } = require('../services/campaignService');
+    await getCampaignWithAccess(req.params.id, req.user);
+    const recipients = await Recipient.find({ campaignId: req.params.id })
+      .select('phone name status sentAt failureReason')
+      .sort({ createdAt: 1 })
+      .lean();
+    const format = (req.query.format || 'csv').toLowerCase();
+    if (format === 'csv') {
+      const header = 'phone,name,status,sentAt,failureReason\n';
+      const rows = recipients.map((r) => {
+        const phone = String(r.phone || '').replace(/"/g, '""');
+        const name = String(r.name || '').replace(/"/g, '""');
+        const status = r.status || '';
+        const sentAt = r.sentAt ? new Date(r.sentAt).toISOString() : '';
+        const reason = String(r.failureReason || '').replace(/"/g, '""');
+        return `"${phone}","${name}","${status}","${sentAt}","${reason}"`;
+      });
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="campaign-recipients.csv"');
+      res.send(header + rows.join('\n'));
+      return;
+    }
+    res.json({ recipients });
   } catch (err) {
     if (err.message === 'Campaign not found') return res.status(404).json({ message: err.message });
     res.status(500).json({ message: err.message || 'Server error' });

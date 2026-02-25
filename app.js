@@ -11,6 +11,8 @@ const campaignsRoutes = require('./routes/campaigns');
 const numbersRoutes = require('./routes/numbers');
 const analyticsRoutes = require('./routes/analytics');
 const settingsRoutes = require('./routes/settings');
+const demoRequestsRoutes = require('./routes/demoRequests');
+const aiRoutes = require('./routes/ai');
 
 const app = express();
 app.use(helmet({ contentSecurityPolicy: NODE_ENV === 'production' }));
@@ -38,6 +40,8 @@ app.use(`${API_PREFIX}/campaigns`, auth, rateLimit, campaignsRoutes);
 app.use(`${API_PREFIX}/numbers`, auth, rateLimit, numbersRoutes);
 app.use(`${API_PREFIX}/analytics`, auth, rateLimit, analyticsRoutes);
 app.use(`${API_PREFIX}/settings`, auth, rateLimit, settingsRoutes);
+app.use(`${API_PREFIX}/demo-requests`, auth, rateLimit, demoRequestsRoutes);
+app.use(`${API_PREFIX}/ai`, auth, rateLimit, aiRoutes);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 

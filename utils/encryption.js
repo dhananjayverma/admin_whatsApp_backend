@@ -5,13 +5,18 @@ const ALGO = 'aes-256-gcm';
 const IV_LEN = 16;
 const AUTH_TAG_LEN = 16;
 const KEY_LEN = 32;
+const SCRYPT_SALT = 'salt';
+const SCRYPT_N = 16384;
 
 function getKey() {
-  const raw = ENCRYPTION_KEY.replace(/[^a-fA-F0-9]/g, '');
+  if (!ENCRYPTION_KEY || typeof ENCRYPTION_KEY !== 'string') {
+    throw new Error('ENCRYPTION_KEY is required for encryption');
+  }
+  const raw = ENCRYPTION_KEY.replace(/\s/g, '').replace(/[^a-fA-F0-9]/g, '');
   if (raw.length >= KEY_LEN * 2) {
     return Buffer.from(raw.slice(0, KEY_LEN * 2), 'hex');
   }
-  return crypto.scryptSync(ENCRYPTION_KEY, 'salt', KEY_LEN);
+  return crypto.scryptSync(ENCRYPTION_KEY, SCRYPT_SALT, KEY_LEN, { N: SCRYPT_N });
 }
 
 function encrypt(text) {

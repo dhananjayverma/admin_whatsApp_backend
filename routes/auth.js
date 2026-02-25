@@ -6,14 +6,40 @@ const { allowRoles } = require('../middleware/rbac');
 const { auth } = require('../middleware/auth');
 const { authRateLimit } = require('../middleware/authRateLimit');
 const { JWT_SECRET, JWT_EXPIRES_IN } = require('../config/env');
+const { generateCode, createSvg } = require('../utils/captcha');
+const { setCaptcha, getAndDeleteCaptcha, generateCaptchaId } = require('../utils/captchaStore');
 
 const router = express.Router();
 
+router.get('/captcha', async (req, res) => {
+  try {
+    const id = generateCaptchaId();
+    const code = generateCode();
+    await setCaptcha(id, code);
+    const svg = createSvg(code);
+    res.json({ captchaId: id, svg });
+  } catch (err) {
+    console.error('Captcha error:', err);
+    res.status(500).json({ message: 'Failed to generate captcha' });
+  }
+});
+
 router.post('/login', authRateLimit, async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, password, captchaId, captchaCode } = req.body || {};
     const emailStr = typeof email === 'string' ? email.trim().toLowerCase().slice(0, 254) : '';
     const passStr = typeof password === 'string' ? password : '';
+    const capId = typeof captchaId === 'string' ? captchaId.trim() : '';
+    const capCode = typeof captchaCode === 'string' ? captchaCode.trim() : '';
+
+    if (!capId || !capCode) {
+      return res.status(400).json({ message: 'Captcha code is required' });
+    }
+    const storedCode = await getAndDeleteCaptcha(capId);
+    if (!storedCode || storedCode !== capCode) {
+      return res.status(400).json({ message: 'Invalid or expired captcha. Please refresh and try again.' });
+    }
+
     if (!emailStr || !passStr) {
       return res.status(400).json({ message: 'Email and password required' });
     }

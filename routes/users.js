@@ -5,6 +5,10 @@ const { allowRoles } = require('../middleware/rbac');
 
 const router = express.Router();
 
+router.get('/me', auth, (req, res) => {
+  res.json({ user: req.user });
+});
+
 router.get('/', auth, allowRoles('admin', 'reseller'), async (req, res) => {
   try {
     const { role, resellerId } = req.query;
