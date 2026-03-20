@@ -33,7 +33,14 @@ async function create(userId, name, messageBody = '', options = {}) {
     type = 'text',
     buttonQuestion = '',
     buttonOptions = [],
+    delayMs,
+    delayMin,
+    delayMax,
   } = options;
+
+  const resolvedMin = typeof delayMin === 'number' && delayMin >= 0 ? delayMin : 4000;
+  const resolvedMax = typeof delayMax === 'number' && delayMax >= resolvedMin ? delayMax : Math.max(resolvedMin + 2000, 10000);
+
   const campaign = await Campaign.create({
     userId,
     name: (name && String(name).trim()) || 'Untitled Campaign',
@@ -43,6 +50,9 @@ async function create(userId, name, messageBody = '', options = {}) {
     buttonOptions: type === 'button' && Array.isArray(buttonOptions)
       ? buttonOptions.map((o) => String(o).slice(0, 100)).filter(Boolean)
       : [],
+    delayMs: typeof delayMs === 'number' && delayMs >= 0 ? delayMs : 5000,
+    delayMin: resolvedMin,
+    delayMax: resolvedMax,
     status: 'draft',
   });
   return campaign;
@@ -80,18 +90,21 @@ async function start(campaignId, user) {
       throw new Error('Campaign cannot be started');
     }
 
-    const recipientCount = campaign.recipientCount || (await Recipient.countDocuments({ campaignId }));
-    if (recipientCount === 0) throw new Error('No recipients');
+    // For draft campaigns charge total recipients.
+    // For paused (resumed) campaigns charge only the remaining pending recipients
+    // to avoid double-charging for messages already sent.
+    const pendingCount = await Recipient.countDocuments({ campaignId, status: 'pending' });
+    if (pendingCount === 0) throw new Error('No pending recipients');
 
-    const totalCost = recipientCount * COST_PER_MESSAGE;
-    await creditService.deduct(ownerId, totalCost, campaignId, { recipientCount });
+    const totalCost = pendingCount * COST_PER_MESSAGE;
+    await creditService.deduct(ownerId, totalCost, campaignId, { recipientCount: pendingCount });
 
     await Campaign.updateOne(
       { _id: campaignId },
       {
-        status: 'queued',
-        startedAt: new Date(),
+        $set: { status: 'queued', startedAt: new Date(), pauseReason: '', blockedNumberId: null },
         $inc: { creditsUsed: totalCost },
+        $unset: { pausedAt: '' },
       }
     );
 
@@ -105,15 +118,17 @@ async function start(campaignId, user) {
       chunks.push(ids.slice(i, i + CHUNK_SIZE));
     }
 
+    const jobDelayMin = typeof campaign.delayMin === 'number' ? campaign.delayMin : 4000;
+    const jobDelayMax = typeof campaign.delayMax === 'number' ? campaign.delayMax : 10000;
     for (const chunk of chunks) {
       await whatsappQueue.add(
-        { campaignId: campaignId.toString(), recipientIds: chunk },
+        { campaignId: campaignId.toString(), recipientIds: chunk, delayMin: jobDelayMin, delayMax: jobDelayMax },
         { attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
       );
     }
 
     await Campaign.updateOne({ _id: campaignId }, { status: 'running' });
-    logger.info('Campaign started', { campaignId, chunks: chunks.length, recipientCount, ownerId });
+    logger.info('Campaign started', { campaignId, chunks: chunks.length, pendingCount, ownerId });
     return { campaignId, jobsAdded: chunks.length };
   } finally {
     await redis.del(lockKey).catch(() => {});
@@ -125,7 +140,10 @@ async function pause(campaignId, user) {
   if (campaign.status !== 'running' && campaign.status !== 'queued') {
     throw new Error('Campaign cannot be paused');
   }
-  await Campaign.updateOne({ _id: campaignId }, { status: 'paused' });
+  await Campaign.updateOne(
+    { _id: campaignId },
+    { $set: { status: 'paused', pausedAt: new Date(), pauseReason: 'manual_pause — Paused manually by admin.' } }
+  );
   return { status: 'paused' };
 }
 
@@ -147,6 +165,13 @@ async function update(campaignId, user, payload) {
     update.buttonOptions = Array.isArray(payload.buttonOptions)
       ? payload.buttonOptions.map((o) => String(o).slice(0, 100)).filter(Boolean)
       : [];
+  }
+  if (typeof payload.delayMin === 'number' && payload.delayMin >= 0) {
+    update.delayMin = payload.delayMin;
+  }
+  if (typeof payload.delayMax === 'number') {
+    const min = update.delayMin ?? campaign.delayMin ?? 4000;
+    update.delayMax = Math.max(payload.delayMax, min + 500);
   }
   if (Object.keys(update).length === 0) return Campaign.findById(campaignId).lean();
   await Campaign.updateOne({ _id: campaignId }, update);

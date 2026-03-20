@@ -21,21 +21,26 @@ router.get('/chatbot', auth, allowRoles('admin', 'reseller', 'client'), async (r
     res.json({
       enabled: doc?.enabled ?? false,
       welcomeMessage: doc?.welcomeMessage ?? '',
+      fallbackMessage: doc?.fallbackMessage ?? '',
+      rules: Array.isArray(doc?.rules) ? doc.rules : [],
     });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
   }
 });
 
-router.put('/chatbot', auth, allowRoles('admin'), async (req, res) => {
+router.put('/chatbot', auth, allowRoles('admin', 'client'), async (req, res) => {
   try {
-    const { enabled, welcomeMessage } = req.body || {};
+    const { enabled, welcomeMessage, fallbackMessage, rules } = req.body || {};
+    const sanitizedRules = Array.isArray(rules)
+      ? rules.filter((r) => r.keyword && r.reply).map((r) => ({ keyword: String(r.keyword).slice(0, 100), reply: String(r.reply).slice(0, 500) }))
+      : [];
     const doc = await ChatbotConfig.findOneAndUpdate(
       { key: 'default' },
-      { $set: { enabled: !!enabled, welcomeMessage: String(welcomeMessage || '').slice(0, 500) } },
+      { $set: { enabled: !!enabled, welcomeMessage: String(welcomeMessage || '').slice(0, 500), fallbackMessage: String(fallbackMessage || '').slice(0, 500), rules: sanitizedRules } },
       { upsert: true, new: true }
     ).lean();
-    res.json({ enabled: doc.enabled, welcomeMessage: doc.welcomeMessage });
+    res.json({ enabled: doc.enabled, welcomeMessage: doc.welcomeMessage, fallbackMessage: doc.fallbackMessage, rules: doc.rules });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
   }

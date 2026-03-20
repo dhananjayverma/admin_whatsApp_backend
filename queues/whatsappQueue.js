@@ -10,6 +10,7 @@ const stubQueue = {
 };
 
 if (!REDIS_ENABLED) {
+  console.warn('Redis is disabled (REDIS_ENABLED=0). WhatsApp queue is a no-op stub — workers and job processing are disabled.');
   module.exports = stubQueue;
   return;
 }

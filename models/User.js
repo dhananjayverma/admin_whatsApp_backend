@@ -11,6 +11,9 @@ const userSchema = new mongoose.Schema(
     actionBtnCredit: { type: Number, default: 0 },
     btnSmsCredit: { type: Number, default: 0 },
     apiDaysCredit: { type: Number, default: 0 },
+    isActive: { type: Boolean, default: true },
+    // null = all sections visible; array of keys = only those sections shown
+    enabledSections: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

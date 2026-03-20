@@ -17,9 +17,15 @@ const campaignSchema = new mongoose.Schema(
     type: { type: String, enum: ['text', 'button', 'dp'], default: 'text' },
     buttonQuestion: { type: String, default: '' },
     buttonOptions: [{ type: String }],
+    delayMs: { type: Number, default: 5000 },
+    delayMin: { type: Number, default: 4000 },
+    delayMax: { type: Number, default: 10000 },
     scheduledAt: Date,
     startedAt: Date,
     completedAt: Date,
+    pausedAt: Date,
+    pauseReason: { type: String, default: '' },
+    blockedNumberId: { type: mongoose.Schema.Types.ObjectId, ref: 'VirtualNumber', default: null },
   },
   { timestamps: true }
 );

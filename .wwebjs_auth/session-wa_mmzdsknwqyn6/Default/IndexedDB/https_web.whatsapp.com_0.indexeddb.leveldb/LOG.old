@@ -1,0 +1,52 @@
+2026/03/21-02:30:18.666 2ecc Reusing MANIFEST C:\Users\Dell\Downloads\hack\backend\.wwebjs_auth\session-wa_mmzdsknwqyn6\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/03/21-02:30:18.667 2ecc Recovering log #3
+2026/03/21-02:30:43.146 2ecc Reusing old log C:\Users\Dell\Downloads\hack\backend\.wwebjs_auth\session-wa_mmzdsknwqyn6\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/000003.log 
+2026/03/21-02:30:49.050 365c Level-0 table #5: started
+2026/03/21-02:30:51.394 365c Level-0 table #5: 988612 bytes OK
+2026/03/21-02:30:51.398 365c Delete type=0 #3
+2026/03/21-02:31:16.433 365c Level-0 table #7: started
+2026/03/21-02:31:16.717 365c Level-0 table #7: 1235386 bytes OK
+2026/03/21-02:31:16.719 365c Delete type=0 #4
+2026/03/21-02:31:17.125 3c70 Compacting 1@1 + 1@2 files
+2026/03/21-02:31:18.949 3c70 Generated table #8@1: 22374 keys, 1139731 bytes
+2026/03/21-02:31:18.949 3c70 Compacted 1@1 + 1@2 files => 1139731 bytes
+2026/03/21-02:31:18.951 3c70 compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/03/21-02:31:34.583 365c Level-0 table #10: started
+2026/03/21-02:31:34.667 365c Level-0 table #10: 992856 bytes OK
+2026/03/21-02:31:34.670 365c Delete type=2 #5
+2026/03/21-02:31:34.671 365c Delete type=0 #6
+2026/03/21-02:31:34.671 365c Delete type=2 #7
+2026/03/21-02:31:34.729 365c Compacting 1@1 + 1@2 files
+2026/03/21-02:31:35.283 365c Generated table #11@1: 41385 keys, 1794547 bytes
+2026/03/21-02:31:35.283 365c Compacted 1@1 + 1@2 files => 1794547 bytes
+2026/03/21-02:31:35.286 365c compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/03/21-02:31:35.287 365c Delete type=2 #8
+2026/03/21-02:31:35.287 365c Delete type=2 #10
+2026/03/21-02:31:43.460 365c Level-0 table #13: started
+2026/03/21-02:31:43.576 365c Level-0 table #13: 1000489 bytes OK
+2026/03/21-02:31:43.579 365c Delete type=0 #9
+2026/03/21-02:31:43.595 365c Compacting 1@1 + 1@2 files
+2026/03/21-02:31:44.349 365c Generated table #14@1: 32857 keys, 1708836 bytes
+2026/03/21-02:31:44.349 365c Compacted 1@1 + 1@2 files => 1708836 bytes
+2026/03/21-02:31:44.350 365c compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/03/21-02:31:47.987 365c Level-0 table #16: started
+2026/03/21-02:31:48.782 365c Level-0 table #16: 1015626 bytes OK
+2026/03/21-02:31:48.788 365c Delete type=2 #11
+2026/03/21-02:31:48.788 365c Delete type=0 #12
+2026/03/21-02:31:48.788 365c Delete type=2 #13
+2026/03/21-02:31:49.155 365c Compacting 1@1 + 1@2 files
+2026/03/21-02:31:50.101 365c Generated table #17@1: 39128 keys, 2092315 bytes
+2026/03/21-02:31:50.101 365c Compacted 1@1 + 1@2 files => 2092315 bytes
+2026/03/21-02:31:50.104 365c compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/03/21-02:32:50.876 1a04 Level-0 table #19: started
+2026/03/21-02:32:51.237 1a04 Level-0 table #19: 1027043 bytes OK
+2026/03/21-02:32:51.250 1a04 Delete type=2 #14
+2026/03/21-02:32:51.252 1a04 Delete type=0 #15
+2026/03/21-02:32:51.252 1a04 Delete type=2 #16
+2026/03/21-02:32:51.875 365c Compacting 1@1 + 1@2 files
+2026/03/21-02:32:52.966 365c Generated table #20@1: 36039 keys, 2205086 bytes
+2026/03/21-02:32:53.003 365c Generated table #21@1: 8664 keys, 310283 bytes
+2026/03/21-02:32:53.003 365c Compacted 1@1 + 1@2 files => 2515369 bytes
+2026/03/21-02:32:53.005 365c compacted to: files[ 0 0 2 0 0 0 0 ]
+2026/03/21-02:32:53.005 365c Delete type=2 #17
+2026/03/21-02:32:53.005 365c Delete type=2 #19

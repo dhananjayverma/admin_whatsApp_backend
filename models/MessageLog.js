@@ -14,5 +14,6 @@ const messageLogSchema = new mongoose.Schema(
 );
 
 messageLogSchema.index({ campaignId: 1, sentAt: -1 });
+messageLogSchema.index({ virtualNumberId: 1, sentAt: -1 });
 
 module.exports = mongoose.model('MessageLog', messageLogSchema);

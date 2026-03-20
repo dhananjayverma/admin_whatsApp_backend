@@ -23,6 +23,15 @@ function validateCampaignBody(req, res, next) {
   if (body.buttonOptions !== undefined && !Array.isArray(body.buttonOptions)) {
     return res.status(400).json({ message: 'Invalid button options' });
   }
+  if (body.delayMin !== undefined && (typeof body.delayMin !== 'number' || body.delayMin < 0)) {
+    return res.status(400).json({ message: 'delayMin must be a non-negative number (milliseconds)' });
+  }
+  if (body.delayMax !== undefined && (typeof body.delayMax !== 'number' || body.delayMax < 0)) {
+    return res.status(400).json({ message: 'delayMax must be a non-negative number (milliseconds)' });
+  }
+  if (body.delayMin !== undefined && body.delayMax !== undefined && body.delayMax <= body.delayMin) {
+    return res.status(400).json({ message: 'delayMax must be greater than delayMin' });
+  }
   next();
 }
 

@@ -77,10 +77,14 @@ router.post('/', auth, allowRoles('admin', 'reseller', 'client'), async (req, re
       return res.status(400).json({ message: 'Demo limit reached (2 per day). Try again tomorrow.' });
     }
 
-    const { message = '' } = req.body || {};
+    const { message = '', creditType = '', userName = '', phone = '' } = req.body || {};
+    const validCreditTypes = ['normal', 'r_btn', 'action_btn', 'btn_sms'];
     const demo = await DemoRequest.create({
       userId: req.user._id,
       type: 'demo',
+      creditType: validCreditTypes.includes(creditType) ? creditType : '',
+      userName: String(userName).slice(0, 100),
+      phone: String(phone).replace(/\D/g, '').slice(0, 15),
       status: 'pending',
       message: String(message).slice(0, 500),
     });
@@ -88,6 +92,19 @@ router.post('/', auth, allowRoles('admin', 'reseller', 'client'), async (req, re
     await redis.expire(demoKey, 86400 * 2);
 
     res.status(201).json({ request: demo, demosRemaining: DEMO_LIMIT_PER_DAY - count - 1 });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// Client/reseller: list own requests
+router.get('/my', auth, allowRoles('admin', 'reseller', 'client'), async (req, res) => {
+  try {
+    const list = await DemoRequest.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    res.json({ list });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
   }

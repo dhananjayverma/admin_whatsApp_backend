@@ -13,8 +13,21 @@ const analyticsRoutes = require('./routes/analytics');
 const settingsRoutes = require('./routes/settings');
 const demoRequestsRoutes = require('./routes/demoRequests');
 const aiRoutes = require('./routes/ai');
+const whatsappRoutes = require('./routes/whatsapp');
+const apiKeysRoutes = require('./routes/apiKeys');
 
 const app = express();
+// Optional request logging for debugging. Enable by setting DEBUG_REQUESTS=1 in .env
+if (process.env.DEBUG_REQUESTS === '1') {
+  app.use((req, res, next) => {
+    try {
+      console.log('[REQ]', new Date().toISOString(), req.method, req.originalUrl, 'Host:', req.headers.host);
+    } catch (e) {
+      // ignore logging errors
+    }
+    next();
+  });
+}
 app.use(helmet({ contentSecurityPolicy: NODE_ENV === 'production' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
@@ -42,6 +55,8 @@ app.use(`${API_PREFIX}/analytics`, auth, rateLimit, analyticsRoutes);
 app.use(`${API_PREFIX}/settings`, auth, rateLimit, settingsRoutes);
 app.use(`${API_PREFIX}/demo-requests`, auth, rateLimit, demoRequestsRoutes);
 app.use(`${API_PREFIX}/ai`, auth, rateLimit, aiRoutes);
+app.use(`${API_PREFIX}/whatsapp`, whatsappRoutes);
+app.use(`${API_PREFIX}/api-keys`, auth, rateLimit, apiKeysRoutes);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 

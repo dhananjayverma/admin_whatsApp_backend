@@ -1,0 +1,4 @@
+2026/03/21-02:18:08.576 2da8 Creating DB C:\Users\Dell\Downloads\hack\backend\.wwebjs_auth\session-wa_mmzdclycqhxi\Default\shared_proto_db since it was missing.
+2026/03/21-02:18:08.585 2da8 Reusing MANIFEST C:\Users\Dell\Downloads\hack\backend\.wwebjs_auth\session-wa_mmzdclycqhxi\Default\shared_proto_db/MANIFEST-000001
+2026/03/21-02:18:11.324 2da8 Recovering log #3
+2026/03/21-02:18:12.110 2da8 Reusing old log C:\Users\Dell\Downloads\hack\backend\.wwebjs_auth\session-wa_mmzdclycqhxi\Default\shared_proto_db/000003.log 

@@ -31,11 +31,14 @@ const canAccessCampaign = (campaign, user) => {
 
 router.post('/', auth, allowRoles('admin', 'reseller', 'client'), validateCampaignBody, async (req, res) => {
   try {
-    const { name, messageBody, type, buttonQuestion, buttonOptions } = req.body || {};
+    const { name, messageBody, type, buttonQuestion, buttonOptions, delayMs, delayMin, delayMax } = req.body || {};
     const campaign = await campaignService.create(req.user._id, name, messageBody, {
       type,
       buttonQuestion,
       buttonOptions,
+      delayMs: typeof delayMs === 'number' ? delayMs : undefined,
+      delayMin: typeof delayMin === 'number' ? delayMin : undefined,
+      delayMax: typeof delayMax === 'number' ? delayMax : undefined,
     });
     res.status(201).json({ campaign });
   } catch (err) {
@@ -72,13 +75,15 @@ router.get('/:id', auth, allowRoles('admin', 'reseller', 'client'), validateMong
 
 router.put('/:id', auth, allowRoles('admin', 'reseller', 'client'), validateMongoId('id'), validateCampaignBody, async (req, res) => {
   try {
-    const { name, messageBody, type, buttonQuestion, buttonOptions } = req.body || {};
+    const { name, messageBody, type, buttonQuestion, buttonOptions, delayMin, delayMax } = req.body || {};
     const campaign = await campaignService.update(req.params.id, req.user, {
       name,
       messageBody,
       type,
       buttonQuestion,
       buttonOptions,
+      delayMin: typeof delayMin === 'number' ? delayMin : undefined,
+      delayMax: typeof delayMax === 'number' ? delayMax : undefined,
     });
     res.json({ campaign });
   } catch (err) {
