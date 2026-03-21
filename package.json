@@ -4,6 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "postinstall": "npx puppeteer browsers install chrome",
     "worker": "node workers/whatsappWorker.js",
     "dev": "node server.js",
     "smoke": "node scripts/smokeTest.js",

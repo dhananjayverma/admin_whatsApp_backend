@@ -8,6 +8,9 @@ node_modules/
 .wwebjs_cache/
 session-*/
 
+# Puppeteer Chrome binary cache
+.cache/
+
 # Uploaded media files
 uploads/
 
