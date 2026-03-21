@@ -1,9 +1,29 @@
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execSync, exec } = require('child_process');
 const logger = require('../utils/logger');
+
+// ── cloud vs local detection ──────────────────────────────────────────────────
+// When PUPPETEER_EXECUTABLE_PATH is set we're on a cloud/container host (Render etc.)
+// and must use RemoteAuth (MongoDB-backed) so sessions survive redeploys.
+const IS_CLOUD = !!process.env.PUPPETEER_EXECUTABLE_PATH;
+
+// For RemoteAuth temp files — use /tmp on cloud (always writable), local dir otherwise
+const DATA_PATH = IS_CLOUD ? os.tmpdir() : path.join(__dirname, '..');
+
+// Lazy MongoStore — only required when IS_CLOUD so wwebjs-mongo isn't needed locally
+let _mongoStore = null;
+function _getMongoStore() {
+  if (!_mongoStore) {
+    const { MongoStore } = require('wwebjs-mongo');
+    const mongoose = require('mongoose');
+    _mongoStore = new MongoStore({ mongoose });
+  }
+  return _mongoStore;
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,6 +72,7 @@ function _clearSessionLock(clientId) {
 
 // Kill ALL chrome.exe processes on this machine (used once at startup to clear orphans)
 function _killAllChrome() {
+  if (IS_CLOUD) return; // not needed on Linux cloud hosts
   try {
     execSync('taskkill /IM chrome.exe /F /T', { stdio: 'ignore' });
     logger.info('[WA] Cleared all orphaned Chrome processes');
@@ -60,6 +81,7 @@ function _killAllChrome() {
 
 // Delete every SingletonLock file under .wwebjs_auth
 function _deleteAllLocks() {
+  if (IS_CLOUD) return; // RemoteAuth doesn't use this dir on cloud
   try {
     if (!fs.existsSync(AUTH_DIR)) return;
     const sessions = fs.readdirSync(AUTH_DIR);
@@ -84,12 +106,14 @@ const PUPPETEER_ARGS = [
   '--disable-accelerated-2d-canvas',
   '--no-first-run',
   '--no-zygote',
+  '--single-process',        // required on some cloud/container hosts
   '--disable-gpu',
   '--disable-extensions',
   '--disable-background-networking',
   '--disable-sync',
   '--metrics-recording-only',
   '--mute-audio',
+  '--disable-software-rasterizer',
 ];
 
 // ── private ───────────────────────────────────────────────────────────────────
@@ -132,7 +156,7 @@ function _restartClient(clientId) {
 function _createClient(clientId, label, phone, restartCount = 0) {
   if (clients.has(clientId)) return;
 
-  // Remove any leftover lock before starting
+  // Remove any leftover lock before starting (local only)
   _clearSessionLock(clientId);
 
   const state = {
@@ -147,9 +171,24 @@ function _createClient(clientId, label, phone, restartCount = 0) {
   };
   clients.set(clientId, state);
 
+  // Choose auth strategy based on environment
+  const authStrategy = IS_CLOUD
+    ? new RemoteAuth({
+        clientId,
+        store:                _getMongoStore(),
+        backupSyncIntervalMs: 300000,   // sync every 5 minutes
+        dataPath:             DATA_PATH,
+      })
+    : new LocalAuth({ clientId });
+
+  const puppeteerConfig = { headless: true, args: PUPPETEER_ARGS };
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    puppeteerConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
   const c = new Client({
-    authStrategy: new LocalAuth({ clientId }),
-    puppeteer:    { headless: true, args: PUPPETEER_ARGS },
+    authStrategy,
+    puppeteer: puppeteerConfig,
     webVersionCache: {
       type:       'remote',
       remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
@@ -182,6 +221,11 @@ function _createClient(clientId, label, phone, restartCount = 0) {
     state.qr           = null;
     state.restartCount = 0;
     logger.info(`[WA:${clientId}] ready`);
+  });
+
+  // RemoteAuth fires this after saving the session to MongoDB
+  c.on('remote_session_saved', () => {
+    logger.info(`[WA:${clientId}] Session saved to MongoDB`);
   });
 
   c.on('auth_failure', () => {
@@ -219,12 +263,16 @@ async function initAll() {
     logger.info('[WA] Created default account');
   }
 
-  // ① Kill every orphaned Chrome process from previous runs
-  _killAllChrome();
-  // ② Delete every stale lock file
-  _deleteAllLocks();
-  // ③ Short pause so OS fully releases file handles after the kills
-  await new Promise((r) => setTimeout(r, 1500));
+  if (!IS_CLOUD) {
+    // ① Kill every orphaned Chrome process from previous runs (Windows only)
+    _killAllChrome();
+    // ② Delete every stale lock file (LocalAuth only)
+    _deleteAllLocks();
+    // ③ Short pause so OS fully releases file handles after the kills
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  logger.info(`[WA] Using ${IS_CLOUD ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
 
   // ④ Start admin accounts one at a time, 3 s apart — avoids simultaneous Chrome launches
   for (let i = 0; i < adminAccounts.length; i++) {
