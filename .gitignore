@@ -11,6 +11,9 @@ session-*/
 # Puppeteer Chrome binary cache
 .cache/
 
+# WhatsApp web version HTML cache
+.wwebjs_cache/
+
 # Uploaded media files
 uploads/
 
