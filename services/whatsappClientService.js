@@ -55,10 +55,10 @@ function _deleteLockFiles(dir) {
 }
 
 // Full startup cleanup: kill Chrome then wipe every lock in .wwebjs_auth tree
-function _fullCleanup() {
+async function _fullCleanup() {
   if (IS_CLOUD) return;
   _killAllChrome();
-  _spinWait(2000);
+  await new Promise((r) => setTimeout(r, 800)); // async wait — does NOT block event loop
   _deleteLockFiles(AUTH_DIR);
   logger.info('[WA] Startup cleanup complete');
 }
@@ -98,12 +98,20 @@ const PUPPETEER_ARGS = [
   '--no-first-run',
   '--no-zygote',
   '--disable-gpu',
+  '--disable-software-rasterizer',
   '--disable-extensions',
-  '--disable-background-networking',
   '--disable-sync',
+  '--disable-translate',
+  '--disable-default-apps',
+  '--disable-hang-monitor',
+  '--disable-client-side-phishing-detection',
+  '--disable-popup-blocking',
+  '--disable-prompt-on-repost',
   '--metrics-recording-only',
   '--mute-audio',
-  '--disable-software-rasterizer',
+  '--no-default-browser-check',
+  '--autoplay-policy=no-user-gesture-required',
+  // NOTE: --disable-background-networking REMOVED — WhatsApp needs background network access
   ...(IS_CLOUD ? ['--single-process'] : []),
 ];
 
@@ -179,8 +187,8 @@ function _createClient(clientId, label, phone, restartCount = 0) {
     authStrategy,
     puppeteer: puppeteerConfig,
     webVersionCache: {
-      type:       'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+      type: 'local',
+      path: path.join(__dirname, '../.wwebjs_cache'),
     },
   });
   state.client = c;
@@ -260,8 +268,7 @@ async function initAll() {
   }
 
   if (!IS_CLOUD) {
-    _fullCleanup();
-    await new Promise((r) => setTimeout(r, 1000));
+    await _fullCleanup();
   }
 
   logger.info(`[WA] Using ${IS_CLOUD ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
