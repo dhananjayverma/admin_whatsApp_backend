@@ -6,6 +6,7 @@ node_modules/
 # WhatsApp session files (contain auth tokens)
 .wwebjs_auth/
 .wwebjs_cache/
+session-*/
 
 # Uploaded media files
 uploads/
