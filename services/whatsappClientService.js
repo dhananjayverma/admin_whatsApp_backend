@@ -6,8 +6,33 @@ const path = require('path');
 const { execSync } = require('child_process');
 const logger = require('../utils/logger');
 
-const IS_CLOUD = !!process.env.PUPPETEER_EXECUTABLE_PATH;
+// IS_CLOUD = true when running on Render/container (Linux, no display)
+const IS_CLOUD = process.platform !== 'win32';
 const DATA_PATH = IS_CLOUD ? os.tmpdir() : path.join(__dirname, '..');
+
+// Resolve Chrome executable once at startup — explicit path prevents "Chrome not found" loops
+function _resolveChromePath() {
+  // 1. Explicit override via env (Render dashboard or .env)
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
+  // 2. Use puppeteer's own resolution (reads .puppeteerrc.cjs / PUPPETEER_CACHE_DIR)
+  try {
+    const p = require('puppeteer').executablePath();
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
+  // 3. Common Linux paths (Render / cloud)
+  const linuxPaths = [
+    '/usr/bin/google-chrome', '/usr/bin/chromium-browser', '/usr/bin/chromium',
+    '/usr/bin/google-chrome-stable',
+  ];
+  for (const p of linuxPaths) { if (fs.existsSync(p)) return p; }
+  return null;
+}
+const CHROME_PATH = _resolveChromePath();
+if (CHROME_PATH) {
+  logger.info(`[WA] Chrome found: ${CHROME_PATH}`);
+} else {
+  logger.error('[WA] Chrome NOT found — run: npx puppeteer browsers install chrome');
+}
 
 // LocalAuth stores sessions at <dataPath>/.wwebjs_auth/session-<clientId>/
 // dataPath must be the PARENT of .wwebjs_auth (the backend/ folder)
@@ -164,9 +189,9 @@ function _createClient(clientId, label, phone, restartCount = 0) {
   };
   clients.set(clientId, state);
 
-  // CRITICAL: dataPath = backend/ folder so Chrome uses
-  //   backend/.wwebjs_auth/session-<clientId>/ as its userDataDir
-  const authStrategy = IS_CLOUD
+  // Use RemoteAuth (MongoDB) only when explicitly configured via env
+  const USE_REMOTE_AUTH = !!process.env.MONGODB_SESSION_STORE;
+  const authStrategy = USE_REMOTE_AUTH
     ? new RemoteAuth({
         clientId,
         store:                _getMongoStore(),
@@ -175,13 +200,16 @@ function _createClient(clientId, label, phone, restartCount = 0) {
       })
     : new LocalAuth({
         clientId,
-        dataPath: path.join(__dirname, '..'),  // backend/
+        dataPath: path.join(__dirname, '..'),  // sessions → backend/.wwebjs_auth/session-<id>/
       });
 
-  const puppeteerConfig = { headless: true, args: PUPPETEER_ARGS };
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    puppeteerConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (!CHROME_PATH) {
+    logger.error(`[WA:${clientId}] Cannot start — Chrome not installed. Run: npx puppeteer browsers install chrome`);
+    state.status = 'disconnected';
+    clients.delete(clientId);
+    return;
   }
+  const puppeteerConfig = { headless: true, args: PUPPETEER_ARGS, executablePath: CHROME_PATH };
 
   const c = new Client({
     authStrategy,
@@ -271,7 +299,7 @@ async function initAll() {
     await _fullCleanup();
   }
 
-  logger.info(`[WA] Using ${IS_CLOUD ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
+  logger.info(`[WA] Using ${process.env.MONGODB_SESSION_STORE ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
 
   for (let i = 0; i < adminAccounts.length; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, 4000));
