@@ -33,24 +33,9 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const allowed = ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : null;
-
-  if (!allowed) {
-    // No restriction — allow any origin (development / not configured)
-    res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  } else if (origin && allowed.includes(origin)) {
-    // Origin is explicitly allowed
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    // Origin not allowed — reject preflight immediately
-    if (req.method === 'OPTIONS') return res.sendStatus(403);
-    // For actual requests let them through but without CORS header (browser will block)
-  }
-
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
