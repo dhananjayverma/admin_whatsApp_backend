@@ -36,7 +36,11 @@ if (CHROME_PATH) {
 
 // LocalAuth stores sessions at <dataPath>/.wwebjs_auth/session-<clientId>/
 // dataPath must be the PARENT of .wwebjs_auth (the backend/ folder)
-const AUTH_DIR = path.join(__dirname, '../.wwebjs_auth');
+const AUTH_DIR  = path.join(__dirname, '../.wwebjs_auth');
+const CACHE_DIR = path.join(__dirname, '../.wwebjs_cache');
+
+// Ensure cache dir exists so webVersionCache:local works on first run (incl. Render)
+if (!fs.existsSync(CACHE_DIR)) { try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch {} }
 
 // ── MongoStore (cloud only) ───────────────────────────────────────────────────
 let _mongoStore = null;
@@ -58,9 +62,14 @@ function _spinWait(ms) {
 
 // Kill every Chrome / Chromium process on this machine
 function _killAllChrome() {
-  if (IS_CLOUD) return;
-  try { execSync('taskkill /IM chrome.exe /F /T',   { stdio: 'ignore' }); } catch {}
-  try { execSync('taskkill /IM chromium.exe /F /T', { stdio: 'ignore' }); } catch {}
+  if (IS_CLOUD) {
+    // Linux / Render: use pkill
+    try { execSync('pkill -f chrome',   { stdio: 'ignore' }); } catch {}
+    try { execSync('pkill -f chromium', { stdio: 'ignore' }); } catch {}
+  } else {
+    try { execSync('taskkill /IM chrome.exe /F /T',   { stdio: 'ignore' }); } catch {}
+    try { execSync('taskkill /IM chromium.exe /F /T', { stdio: 'ignore' }); } catch {}
+  }
   logger.info('[WA] Killed all Chrome/Chromium processes');
 }
 
@@ -81,26 +90,32 @@ function _deleteLockFiles(dir) {
 
 // Full startup cleanup: kill Chrome then wipe every lock in .wwebjs_auth tree
 async function _fullCleanup() {
-  if (IS_CLOUD) return;
   _killAllChrome();
   await new Promise((r) => setTimeout(r, 800)); // async wait — does NOT block event loop
   _deleteLockFiles(AUTH_DIR);
+  if (IS_CLOUD) _deleteLockFiles(os.tmpdir()); // also clean tmpdir on cloud
   logger.info('[WA] Startup cleanup complete');
 }
 
 // Per-session lock clear before creating a client
 function _clearSessionLock(clientId) {
-  if (IS_CLOUD) return;
-  // Lock lives at AUTH_DIR/session-<clientId>/SingletonLock
-  const lockPath = path.join(AUTH_DIR, `session-${clientId}`, 'SingletonLock');
+  // On cloud the session lives in tmpdir, locally in AUTH_DIR
+  const sessionRoot = IS_CLOUD ? os.tmpdir() : AUTH_DIR;
+  const lockPath    = path.join(sessionRoot, `session-${clientId}`, 'SingletonLock');
   if (!fs.existsSync(lockPath)) return;
 
   _killAllChrome();
-  _spinWait(1500);
-
-  for (let i = 0; i < 10; i++) {
-    if (!fs.existsSync(lockPath)) break;
-    try { fs.unlinkSync(lockPath); break; } catch { _spinWait(200); }
+  if (IS_CLOUD) {
+    // On Linux pkill is async-ish; just try to delete immediately
+    for (let i = 0; i < 5; i++) {
+      try { fs.unlinkSync(lockPath); break; } catch { _spinWait(300); }
+    }
+  } else {
+    _spinWait(1500);
+    for (let i = 0; i < 10; i++) {
+      if (!fs.existsSync(lockPath)) break;
+      try { fs.unlinkSync(lockPath); break; } catch { _spinWait(200); }
+    }
   }
 
   if (!fs.existsSync(lockPath)) {
@@ -137,7 +152,8 @@ const PUPPETEER_ARGS = [
   '--no-default-browser-check',
   '--autoplay-policy=no-user-gesture-required',
   // NOTE: --disable-background-networking REMOVED — WhatsApp needs background network access
-  ...(IS_CLOUD ? ['--single-process'] : []),
+  // NOTE: --single-process REMOVED — it causes Chrome to crash on scan in cloud environments
+  //       --no-zygote (above) already reduces process count safely
 ];
 
 // ── Private ───────────────────────────────────────────────────────────────────
@@ -214,10 +230,7 @@ function _createClient(clientId, label, phone, restartCount = 0) {
   const c = new Client({
     authStrategy,
     puppeteer: puppeteerConfig,
-    webVersionCache: {
-      type: 'local',
-      path: path.join(__dirname, '../.wwebjs_cache'),
-    },
+    webVersionCache: { type: 'local', path: path.join(__dirname, '../.wwebjs_cache') },
   });
   state.client = c;
 
@@ -229,11 +242,13 @@ function _createClient(clientId, label, phone, restartCount = 0) {
   });
 
   c.on('authenticated', () => {
+    // Set ready immediately on scan so the UI responds instantly — don't wait for 'ready'
+    // which fires 30-60s later after WhatsApp loads all chats
     state.launched     = true;
     state.status       = 'ready';
     state.qr           = null;
     state.restartCount = 0;
-    logger.info(`[WA:${clientId}] Authenticated`);
+    logger.info(`[WA:${clientId}] Authenticated — connected`);
     if (clientId.startsWith('vn_')) {
       const VirtualNumber = require('../models/VirtualNumber');
       VirtualNumber.updateOne(
@@ -295,9 +310,7 @@ async function initAll() {
     logger.info('[WA] Created default account');
   }
 
-  if (!IS_CLOUD) {
-    await _fullCleanup();
-  }
+  await _fullCleanup();
 
   logger.info(`[WA] Using ${process.env.MONGODB_SESSION_STORE ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
 
@@ -343,17 +356,19 @@ async function reconnectAccount(clientId) {
   const WhatsAppAccount = require('../models/WhatsAppAccount');
   const state = clients.get(clientId);
   const doc   = await WhatsAppAccount.findOne({ clientId }).lean();
+  if (!doc) throw new Error(`Account ${clientId} not found in database`);
   if (state) {
     try { state.client?.removeAllListeners(); } catch {}
-    if (state.launched) {
+    if (state.launched && state.status === 'ready') {
+      // Only logout when actually connected — logout() throws when in QR state
       await state.client?.logout().catch(() => {});
-      await state.client?.destroy().catch(() => {});
     }
+    await state.client?.destroy().catch(() => {});
     clients.delete(clientId);
     _clearSessionLock(clientId);
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, IS_CLOUD ? 3000 : 2000));
   }
-  _createClient(clientId, doc?.label || '', doc?.phone || '', 0);
+  _createClient(clientId, doc.label || '', doc.phone || '', 0);
 }
 
 async function updateAccount(clientId, { label, phone } = {}) {

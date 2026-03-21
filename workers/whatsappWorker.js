@@ -21,18 +21,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * Classify an error thrown by whatsapp-web.js to determine whether
- * the SENDING NUMBER has been blocked / banned or this is just a
- * per-recipient failure.
- *
- * Returns one of:
- *   'sender_blocked'    – our sending number was banned/blocked by Meta
- *   'rate_limited'      – Meta is throttling our number (soft block)
- *   'not_on_whatsapp'   – recipient is not on WhatsApp (skip, not our fault)
- *   'technical'         – connection crash, browser crash, etc.
- *   'recipient_failure' – any other per-recipient error
- */
+
 function classifyError(err) {
   const msg = (err.message || '').toLowerCase();
 
@@ -78,10 +67,7 @@ function classifyError(err) {
   return 'recipient_failure';
 }
 
-/**
- * Auto-pause the campaign with a human-readable reason and optional
- * reference to the number that triggered the pause.
- */
+
 async function autoPauseCampaign(campaignId, reason, blockedNumberId = null) {
   const update = {
     status: 'paused',

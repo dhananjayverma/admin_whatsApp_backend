@@ -1,7 +1,4 @@
-/**
- * Validate phone numbers: returns total, valid, invalid, duplicate counts and list of valid numbers.
- * Valid: digits only, length 10-15.
- */
+
 function validateNumbers(rows) {
   const raw = Array.isArray(rows) ? rows : [];
   const seen = new Set();

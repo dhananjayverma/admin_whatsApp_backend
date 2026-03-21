@@ -2,22 +2,25 @@ const { connectDB } = require('./config/db');
 const app = require('./app');
 const { PORT } = require('./config/env');
 
-// Puppeteer/whatsapp-web.js throws TargetCloseError as unhandled rejections
-// when the browser tab closes mid-operation. Catch them here to prevent crash.
+
+function _isWWebJSNoise(err) {
+  if (!err) return false;
+  if (err.name === 'TargetCloseError' || err.name === 'ProtocolError') return true;
+  const msg = err.message || '';
+  return (
+    msg.includes('Target closed') ||
+    msg.includes('Execution context was destroyed') ||
+    msg.includes('most likely because of a navigation')
+  );
+}
+
 process.on('unhandledRejection', (err) => {
-  if (err && (err.name === 'TargetCloseError' || err.name === 'ProtocolError' ||
-      (err.message && err.message.includes('Target closed')))) {
-    // Intentionally ignored — whatsapp-web.js auto-restarts via disconnected event
-    return;
-  }
+  if (_isWWebJSNoise(err)) return; // normal whatsapp-web.js page navigation noise
   console.error('[unhandledRejection]', err);
 });
 
 process.on('uncaughtException', (err) => {
-  if (err && (err.name === 'TargetCloseError' || err.name === 'ProtocolError' ||
-      (err.message && err.message.includes('Target closed')))) {
-    return;
-  }
+  if (_isWWebJSNoise(err)) return;
   console.error('[uncaughtException]', err);
   process.exit(1);
 });
