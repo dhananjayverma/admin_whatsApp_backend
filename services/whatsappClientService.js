@@ -3,18 +3,17 @@ const qrcode = require('qrcode');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync, exec } = require('child_process');
+const { execSync } = require('child_process');
 const logger = require('../utils/logger');
 
-// ── cloud vs local detection ──────────────────────────────────────────────────
-// When PUPPETEER_EXECUTABLE_PATH is set we're on a cloud/container host (Render etc.)
-// and must use RemoteAuth (MongoDB-backed) so sessions survive redeploys.
 const IS_CLOUD = !!process.env.PUPPETEER_EXECUTABLE_PATH;
-
-// For RemoteAuth temp files — use /tmp on cloud (always writable), local dir otherwise
 const DATA_PATH = IS_CLOUD ? os.tmpdir() : path.join(__dirname, '..');
 
-// Lazy MongoStore — only required when IS_CLOUD so wwebjs-mongo isn't needed locally
+// LocalAuth stores sessions at <dataPath>/.wwebjs_auth/session-<clientId>/
+// dataPath must be the PARENT of .wwebjs_auth (the backend/ folder)
+const AUTH_DIR = path.join(__dirname, '../.wwebjs_auth');
+
+// ── MongoStore (cloud only) ───────────────────────────────────────────────────
 let _mongoStore = null;
 function _getMongoStore() {
   if (!_mongoStore) {
@@ -25,78 +24,70 @@ function _getMongoStore() {
   return _mongoStore;
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── Chrome / lock helpers ─────────────────────────────────────────────────────
 
-const AUTH_DIR = path.join(__dirname, '../.wwebjs_auth');
+function _spinWait(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {}
+}
 
-// Kill any chrome.exe process that owns a specific session dir, then delete the lock
-function _clearSessionLock(clientId) {
+// Kill every Chrome / Chromium process on this machine
+function _killAllChrome() {
+  if (IS_CLOUD) return;
+  try { execSync('taskkill /IM chrome.exe /F /T',   { stdio: 'ignore' }); } catch {}
+  try { execSync('taskkill /IM chromium.exe /F /T', { stdio: 'ignore' }); } catch {}
+  logger.info('[WA] Killed all Chrome/Chromium processes');
+}
+
+// Recursively delete every SingletonLock file under a directory tree
+function _deleteLockFiles(dir) {
+  if (!fs.existsSync(dir)) return;
   try {
-    const sessionDir = path.join(AUTH_DIR, `session-${clientId}`);
-    const lockPath   = path.join(sessionDir, 'SingletonLock');
-    if (!fs.existsSync(lockPath)) return;
-
-    // Use wmic to find chrome processes that reference this session directory
-    try {
-      const normalised = sessionDir.replace(/\//g, '\\');
-      const out = execSync(
-        `wmic process where "name='chrome.exe'" get ProcessId,CommandLine /format:csv 2>nul`,
-        { timeout: 6000, stdio: ['ignore', 'pipe', 'ignore'] }
-      ).toString();
-
-      out.split('\n').forEach((line) => {
-        if (!line.includes(normalised) && !line.includes(normalised.toLowerCase())) return;
-        const parts = line.split(',');
-        const pid = parseInt(parts[parts.length - 1], 10);
-        if (pid && !isNaN(pid)) {
-          try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch { /* already dead */ }
-        }
-      });
-    } catch { /* wmic unavailable or timeout */ }
-
-    // Retry deleting the lock file up to 10 times over 2s
-    for (let i = 0; i < 10; i++) {
-      try {
-        if (!fs.existsSync(lockPath)) break;
-        fs.unlinkSync(lockPath);
-        logger.info(`[WA:${clientId}] Removed stale SingletonLock`);
-        break;
-      } catch {
-        // Synchronous 200ms wait before retry
-        const t = Date.now() + 200;
-        while (Date.now() < t) { /* spin */ }
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        _deleteLockFiles(full);
+      } else if (entry.name === 'SingletonLock') {
+        try { fs.unlinkSync(full); } catch {}
       }
     }
-  } catch { /* ignore */ }
+  } catch {}
 }
 
-// Kill ALL chrome.exe processes on this machine (used once at startup to clear orphans)
-function _killAllChrome() {
-  if (IS_CLOUD) return; // not needed on Linux cloud hosts
-  try {
-    execSync('taskkill /IM chrome.exe /F /T', { stdio: 'ignore' });
-    logger.info('[WA] Cleared all orphaned Chrome processes');
-  } catch { /* no chrome running — fine */ }
+// Full startup cleanup: kill Chrome then wipe every lock in .wwebjs_auth tree
+function _fullCleanup() {
+  if (IS_CLOUD) return;
+  _killAllChrome();
+  _spinWait(2000);
+  _deleteLockFiles(AUTH_DIR);
+  logger.info('[WA] Startup cleanup complete');
 }
 
-// Delete every SingletonLock file under .wwebjs_auth
-function _deleteAllLocks() {
-  if (IS_CLOUD) return; // RemoteAuth doesn't use this dir on cloud
-  try {
-    if (!fs.existsSync(AUTH_DIR)) return;
-    const sessions = fs.readdirSync(AUTH_DIR);
-    sessions.forEach((dir) => {
-      const lock = path.join(AUTH_DIR, dir, 'SingletonLock');
-      try { if (fs.existsSync(lock)) { fs.unlinkSync(lock); } } catch { /* ignore */ }
-    });
-    logger.info('[WA] Deleted all stale lock files');
-  } catch { /* ignore */ }
+// Per-session lock clear before creating a client
+function _clearSessionLock(clientId) {
+  if (IS_CLOUD) return;
+  // Lock lives at AUTH_DIR/session-<clientId>/SingletonLock
+  const lockPath = path.join(AUTH_DIR, `session-${clientId}`, 'SingletonLock');
+  if (!fs.existsSync(lockPath)) return;
+
+  _killAllChrome();
+  _spinWait(1500);
+
+  for (let i = 0; i < 10; i++) {
+    if (!fs.existsSync(lockPath)) break;
+    try { fs.unlinkSync(lockPath); break; } catch { _spinWait(200); }
+  }
+
+  if (!fs.existsSync(lockPath)) {
+    logger.info(`[WA:${clientId}] Cleared stale session lock`);
+  } else {
+    logger.warn(`[WA:${clientId}] Could not remove lock — Chrome may still hold it`);
+  }
 }
 
-// ── session map ───────────────────────────────────────────────────────────────
-
-const clients    = new Map();  // clientId → state
-const _restarting = new Set(); // clientIds currently being restarted
+// ── Session map ───────────────────────────────────────────────────────────────
+const clients     = new Map();   // clientId → state
+const _restarting = new Set();   // clientIds currently in restart cycle
 let rrIndex = 0;
 
 const PUPPETEER_ARGS = [
@@ -106,7 +97,6 @@ const PUPPETEER_ARGS = [
   '--disable-accelerated-2d-canvas',
   '--no-first-run',
   '--no-zygote',
-  '--single-process',        // required on some cloud/container hosts
   '--disable-gpu',
   '--disable-extensions',
   '--disable-background-networking',
@@ -114,26 +104,25 @@ const PUPPETEER_ARGS = [
   '--metrics-recording-only',
   '--mute-audio',
   '--disable-software-rasterizer',
+  ...(IS_CLOUD ? ['--single-process'] : []),
 ];
 
-// ── private ───────────────────────────────────────────────────────────────────
+// ── Private ───────────────────────────────────────────────────────────────────
 
 function _restartClient(clientId) {
   const state = clients.get(clientId);
-  if (!state) return;
-  if (state.status === 'ready') return;
-  if (_restarting.has(clientId)) return;        // already restarting
+  if (!state || state.status === 'ready' || _restarting.has(clientId)) return;
   if (state.restartCount >= 10) {
-    logger.error(`[WA:${clientId}] Max restart attempts reached. Manual reconnect required.`);
+    logger.error(`[WA:${clientId}] Max restart attempts reached. Use reconnect to reset.`);
     state.status = 'disconnected';
     return;
   }
 
   _restarting.add(clientId);
-  logger.info(`[WA:${clientId}] Auto-restarting (attempt ${state.restartCount + 1})…`);
+  logger.info(`[WA:${clientId}] Auto-restarting (attempt ${state.restartCount + 1})...`);
   const { label, phone, restartCount } = state;
 
-  try { state.client?.removeAllListeners(); } catch { /* ignore */ }
+  try { state.client?.removeAllListeners(); } catch {}
 
   const doRestart = () => {
     _clearSessionLock(clientId);
@@ -143,20 +132,16 @@ function _restartClient(clientId) {
   };
 
   if (state.launched) {
-    // Browser was running — destroy it properly first, then restart
-    state.client?.destroy().catch(() => {}).then(() => {
-      setTimeout(doRestart, 1500);
-    });
+    state.client?.destroy().catch(() => {}).then(() => setTimeout(doRestart, 2000));
   } else {
-    // Browser never launched — just clear the lock and retry
-    doRestart();
+    setTimeout(doRestart, 3000);
   }
 }
 
 function _createClient(clientId, label, phone, restartCount = 0) {
   if (clients.has(clientId)) return;
 
-  // Remove any leftover lock before starting (local only)
+  // Always clear any stale lock before launching
   _clearSessionLock(clientId);
 
   const state = {
@@ -167,19 +152,23 @@ function _createClient(clientId, label, phone, restartCount = 0) {
     qr:           null,
     client:       null,
     restartCount,
-    launched:     false,  // set true once a QR or ready event fires
+    launched:     false,
   };
   clients.set(clientId, state);
 
-  // Choose auth strategy based on environment
+  // CRITICAL: dataPath = backend/ folder so Chrome uses
+  //   backend/.wwebjs_auth/session-<clientId>/ as its userDataDir
   const authStrategy = IS_CLOUD
     ? new RemoteAuth({
         clientId,
         store:                _getMongoStore(),
-        backupSyncIntervalMs: 300000,   // sync every 5 minutes
+        backupSyncIntervalMs: 300000,
         dataPath:             DATA_PATH,
       })
-    : new LocalAuth({ clientId });
+    : new LocalAuth({
+        clientId,
+        dataPath: path.join(__dirname, '..'),  // backend/
+      });
 
   const puppeteerConfig = { headless: true, args: PUPPETEER_ARGS };
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
@@ -200,18 +189,21 @@ function _createClient(clientId, label, phone, restartCount = 0) {
     state.launched = true;
     state.status   = 'qr';
     try { state.qr = await qrcode.toDataURL(qr); } catch { state.qr = null; }
-    logger.info(`[WA:${clientId}] QR ready`);
+    logger.info(`[WA:${clientId}] QR ready — scan now`);
   });
 
   c.on('authenticated', () => {
-    state.launched      = true;
-    state.status        = 'ready';
-    state.qr            = null;
-    state.restartCount  = 0;
-    logger.info(`[WA:${clientId}] authenticated`);
+    state.launched     = true;
+    state.status       = 'ready';
+    state.qr           = null;
+    state.restartCount = 0;
+    logger.info(`[WA:${clientId}] Authenticated`);
     if (clientId.startsWith('vn_')) {
       const VirtualNumber = require('../models/VirtualNumber');
-      VirtualNumber.updateOne({ _id: clientId.replace('vn_', '') }, { $set: { hasWhatsApp: true } }).catch(() => {});
+      VirtualNumber.updateOne(
+        { _id: clientId.replace('vn_', '') },
+        { $set: { hasWhatsApp: true } }
+      ).catch(() => {});
     }
   });
 
@@ -220,42 +212,46 @@ function _createClient(clientId, label, phone, restartCount = 0) {
     state.status       = 'ready';
     state.qr           = null;
     state.restartCount = 0;
-    logger.info(`[WA:${clientId}] ready`);
+    logger.info(`[WA:${clientId}] Ready`);
   });
 
-  // RemoteAuth fires this after saving the session to MongoDB
   c.on('remote_session_saved', () => {
     logger.info(`[WA:${clientId}] Session saved to MongoDB`);
   });
 
   c.on('auth_failure', () => {
     state.status = 'disconnected';
-    logger.error(`[WA:${clientId}] auth failure`);
+    logger.error(`[WA:${clientId}] Auth failure`);
     setTimeout(() => _restartClient(clientId), 15000);
   });
 
-  c.on('disconnected', (r) => {
+  c.on('disconnected', (reason) => {
     state.status = 'disconnected';
     state.qr     = null;
-    logger.warn(`[WA:${clientId}] disconnected: ${r}`);
+    logger.warn(`[WA:${clientId}] Disconnected: ${reason}`);
     setTimeout(() => _restartClient(clientId), 10000);
   });
 
   c.initialize().catch((err) => {
     state.status = 'disconnected';
-    logger.error(`[WA:${clientId}] init error: ${err.message}`);
+    logger.error(`[WA:${clientId}] Init error: ${err.message}`);
+    if (err.message?.includes('already running')) {
+      // Force-clear everything so next retry succeeds
+      _killAllChrome();
+      _deleteLockFiles(AUTH_DIR);
+    }
     setTimeout(() => _restartClient(clientId), 15000);
   });
 }
 
-// ── public ────────────────────────────────────────────────────────────────────
+// ── Public API ────────────────────────────────────────────────────────────────
 
 async function initAll() {
   const WhatsAppAccount = require('../models/WhatsAppAccount');
   let accounts = await WhatsAppAccount.find().lean();
 
   const adminAccounts  = accounts.filter((a) => !a.clientId.startsWith('user_'));
-  const clientAccounts = accounts.filter((a) => a.clientId.startsWith('user_'));
+  const clientAccounts = accounts.filter((a) =>  a.clientId.startsWith('user_'));
 
   if (adminAccounts.length === 0) {
     await WhatsAppAccount.create({ clientId: 'default', label: 'Account 1' });
@@ -264,31 +260,24 @@ async function initAll() {
   }
 
   if (!IS_CLOUD) {
-    // ① Kill every orphaned Chrome process from previous runs (Windows only)
-    _killAllChrome();
-    // ② Delete every stale lock file (LocalAuth only)
-    _deleteAllLocks();
-    // ③ Short pause so OS fully releases file handles after the kills
-    await new Promise((r) => setTimeout(r, 1500));
+    _fullCleanup();
+    await new Promise((r) => setTimeout(r, 1000));
   }
 
   logger.info(`[WA] Using ${IS_CLOUD ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
 
-  // ④ Start admin accounts one at a time, 3 s apart — avoids simultaneous Chrome launches
   for (let i = 0; i < adminAccounts.length; i++) {
-    const a = adminAccounts[i];
-    if (i > 0) await new Promise((r) => setTimeout(r, 3000));
-    _createClient(a.clientId, a.label, a.phone);
+    if (i > 0) await new Promise((r) => setTimeout(r, 4000));
+    _createClient(adminAccounts[i].clientId, adminAccounts[i].label, adminAccounts[i].phone);
   }
   logger.info(`[WA] Initialized ${adminAccounts.length} admin account(s)`);
 
-  // ⑤ Restore client sessions with an extra offset so they don't compete with admin ones
   if (clientAccounts.length > 0) {
-    const offset = adminAccounts.length * 3000 + 3000;
+    const offset = adminAccounts.length * 4000 + 4000;
     clientAccounts.forEach((a, i) => {
-      setTimeout(() => _createClient(a.clientId, a.label, a.phone), offset + i * 3000);
+      setTimeout(() => _createClient(a.clientId, a.label, a.phone), offset + i * 4000);
     });
-    logger.info(`[WA] Scheduling ${clientAccounts.length} client session(s)`);
+    logger.info(`[WA] Scheduling ${clientAccounts.length} user session(s)`);
   }
 }
 
@@ -305,7 +294,7 @@ async function removeAccount(clientId) {
   const WhatsAppAccount = require('../models/WhatsAppAccount');
   const state = clients.get(clientId);
   if (state) {
-    try { state.client?.removeAllListeners(); } catch { /* ignore */ }
+    try { state.client?.removeAllListeners(); } catch {}
     if (state.launched) {
       await state.client?.logout().catch(() => {});
       await state.client?.destroy().catch(() => {});
@@ -320,14 +309,14 @@ async function reconnectAccount(clientId) {
   const state = clients.get(clientId);
   const doc   = await WhatsAppAccount.findOne({ clientId }).lean();
   if (state) {
-    try { state.client?.removeAllListeners(); } catch { /* ignore */ }
+    try { state.client?.removeAllListeners(); } catch {}
     if (state.launched) {
       await state.client?.logout().catch(() => {});
       await state.client?.destroy().catch(() => {});
-      await new Promise((r) => setTimeout(r, 1500));
     }
     clients.delete(clientId);
     _clearSessionLock(clientId);
+    await new Promise((r) => setTimeout(r, 2000));
   }
   _createClient(clientId, doc?.label || '', doc?.phone || '', 0);
 }
@@ -338,7 +327,7 @@ async function updateAccount(clientId, { label, phone } = {}) {
   if (!state) throw new Error('Account not found');
   const update = {};
   if (label !== undefined) { update.label = label; state.label = label; }
-  if (phone !== undefined) { update.phone  = phone;  state.phone  = phone;  }
+  if (phone  !== undefined) { update.phone  = phone;  state.phone  = phone;  }
   await WhatsAppAccount.updateOne({ clientId }, update);
 }
 
@@ -368,13 +357,12 @@ async function sendViaClientId(clientId, phone, message, mediaPath) {
     }
   } catch (err) {
     const isCrash = err.message && (
-      err.message.includes('getChat') || err.message.includes('Target closed') ||
-      err.message.includes('Protocol error') || err.message.includes('Session closed') ||
-      err.name === 'TargetCloseError'
+      err.message.includes('Target closed') || err.message.includes('Protocol error') ||
+      err.message.includes('Session closed') || err.name === 'TargetCloseError'
     );
     if (isCrash) {
       state.status = 'disconnected'; state.qr = null;
-      logger.warn(`[WA:${clientId}] client died during send — restarting in 5s`);
+      logger.warn(`[WA:${clientId}] Client crashed during send — restarting`);
       setTimeout(() => _restartClient(clientId), 5000);
     }
     throw err;
@@ -392,18 +380,23 @@ async function provisionWhatsApp(virtualNumberId, phoneLabel) {
     { upsert: true }
   );
   if (!clients.has(clientId)) _createClient(clientId, label, phoneLabel || '');
-  await VirtualNumber.updateOne({ _id: virtualNumberId }, { $set: { whatsappClientId: clientId, hasWhatsApp: false } });
-  logger.info(`[WA] Provisioned WhatsApp session for virtual number ${phoneLabel}`, { clientId });
+  await VirtualNumber.updateOne(
+    { _id: virtualNumberId },
+    { $set: { whatsappClientId: clientId, hasWhatsApp: false } }
+  );
+  logger.info(`[WA] Provisioned session for ${phoneLabel}`, { clientId });
   return clientId;
 }
 
 async function sendMessage(phone, message, mediaPath) {
   const ready = Array.from(clients.values()).filter((s) => s.status === 'ready' && s.client);
   if (ready.length === 0) throw new Error('No WhatsApp account connected. Please scan the QR code.');
+
   const idx    = rrIndex % ready.length;
   rrIndex      = (rrIndex + 1) % Math.max(ready.length, 1);
-  const chatId = phone.replace(/\D/g, '') + '@c.us';
   const state  = ready[idx];
+  const chatId = phone.replace(/\D/g, '') + '@c.us';
+
   try {
     if (mediaPath && fs.existsSync(mediaPath)) {
       const media = MessageMedia.fromFilePath(mediaPath);
@@ -413,13 +406,12 @@ async function sendMessage(phone, message, mediaPath) {
     }
   } catch (err) {
     const isCrash = err.message && (
-      err.message.includes('getChat') || err.message.includes('Target closed') ||
-      err.message.includes('Protocol error') || err.message.includes('Session closed') ||
-      err.name === 'TargetCloseError'
+      err.message.includes('Target closed') || err.message.includes('Protocol error') ||
+      err.message.includes('Session closed') || err.name === 'TargetCloseError'
     );
     if (isCrash) {
       state.status = 'disconnected'; state.qr = null;
-      logger.warn(`[WA:${state.clientId}] client died during send — restarting in 5s`);
+      logger.warn(`[WA:${state.clientId}] Client crashed during send — restarting`);
       setTimeout(() => _restartClient(state.clientId), 5000);
     }
     throw err;
