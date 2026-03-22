@@ -9,14 +9,12 @@ services:
         value: production
       - key: PUPPETEER_CACHE_DIR
         value: /opt/render/project/src/backend/.cache/puppeteer
+      - key: API_PREFIX
+        value: /api
       - key: REDIS_ENABLED
         value: "0"
       - key: REDIS_URL
         value: redis://localhost:6379
-      - key: API_PREFIX
-        value: /api
-      - key: PORT
-        value: "5000"
       - key: JWT_EXPIRES_IN
         value: 7d
       - key: REFRESH_TOKEN_EXPIRES_IN
@@ -29,5 +27,3 @@ services:
         value: "1"
       - key: MAX_MESSAGES_PER_NUMBER_PER_DAY
         value: "500"
-      # These MUST be set as secret env vars in Render dashboard (not here):
-      # MONGODB_URI, JWT_SECRET, ENCRYPTION_KEY

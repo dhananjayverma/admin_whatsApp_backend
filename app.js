@@ -1,6 +1,6 @@
 const express = require('express');
 const helmet = require('helmet');
-const { API_PREFIX, NODE_ENV } = require('./config/env');
+const { API_PREFIX } = require('./config/env');
 const { auth } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
 
@@ -18,23 +18,29 @@ const apiKeysRoutes     = require('./routes/apiKeys');
 
 const app = express();
 
-// ── CORS — must be first, before helmet and all routes ────────────────────────
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.setHeader('Access-Control-Max-Age', '86400'); // cache preflight for 24h
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
-app.use(helmet({ contentSecurityPolicy: NODE_ENV === 'production', crossOriginResourcePolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy:        false,   // API server — no HTML pages, CSP not needed
+  crossOriginResourcePolicy:    false,   // allow cross-origin resource loading
+  crossOriginEmbedderPolicy:    false,   // allow embedding from other origins
+  crossOriginOpenerPolicy:      false,   // allow cross-origin window.opener access
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Optional request logging
 if (process.env.DEBUG_REQUESTS === '1') {
-  app.use((req, res, next) => {
+  app.use((req, _res, next) => {
     console.log('[REQ]', new Date().toISOString(), req.method, req.originalUrl);
     next();
   });
@@ -53,9 +59,9 @@ app.use(`${API_PREFIX}/ai`,            auth, rateLimit, aiRoutes);
 app.use(`${API_PREFIX}/whatsapp`,      whatsappRoutes);
 app.use(`${API_PREFIX}/api-keys`,      auth, rateLimit, apiKeysRoutes);
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
-app.use((err, req, res, next) => {
+app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ message: err.message || 'Server error' });
 });
