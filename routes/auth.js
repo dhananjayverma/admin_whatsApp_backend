@@ -85,6 +85,5 @@ router.post('/register', auth, allowRoles('admin', 'reseller'), async (req, res)
 router.get('/me', auth, async (req, res) => {
   res.json({ user: req.user });
 });
-// Note: /me is protected by auth middleware above
 
 module.exports = router;

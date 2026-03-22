@@ -4,7 +4,7 @@ const User = require('../models/User');
 const creditService = require('./creditService');
 const whatsappQueue = require('../queues/whatsappQueue');
 const { getRedis } = require('../config/redis');
-const { CHUNK_SIZE, COST_PER_MESSAGE } = require('../config/env');
+const { CHUNK_SIZE, COST_PER_MESSAGE, DEFAULT_DELAY_MIN, DEFAULT_DELAY_MAX } = require('../config/env');
 const logger = require('../utils/logger');
 
 const CAMPAIGN_START_LOCK_TTL = 30;
@@ -38,8 +38,8 @@ async function create(userId, name, messageBody = '', options = {}) {
     delayMax,
   } = options;
 
-  const resolvedMin = typeof delayMin === 'number' && delayMin >= 0 ? delayMin : 4000;
-  const resolvedMax = typeof delayMax === 'number' && delayMax >= resolvedMin ? delayMax : Math.max(resolvedMin + 2000, 10000);
+  const resolvedMin = typeof delayMin === 'number' && delayMin >= 0 ? delayMin : DEFAULT_DELAY_MIN;
+  const resolvedMax = typeof delayMax === 'number' && delayMax >= resolvedMin ? delayMax : Math.max(resolvedMin + 5000, DEFAULT_DELAY_MAX);
 
   const campaign = await Campaign.create({
     userId,
@@ -50,7 +50,7 @@ async function create(userId, name, messageBody = '', options = {}) {
     buttonOptions: type === 'button' && Array.isArray(buttonOptions)
       ? buttonOptions.map((o) => String(o).slice(0, 100)).filter(Boolean)
       : [],
-    delayMs: typeof delayMs === 'number' && delayMs >= 0 ? delayMs : 5000,
+    delayMs: typeof delayMs === 'number' && delayMs >= 0 ? delayMs : DEFAULT_DELAY_MIN,
     delayMin: resolvedMin,
     delayMax: resolvedMax,
     status: 'draft',
@@ -118,8 +118,8 @@ async function start(campaignId, user) {
       chunks.push(ids.slice(i, i + CHUNK_SIZE));
     }
 
-    const jobDelayMin = typeof campaign.delayMin === 'number' ? campaign.delayMin : 4000;
-    const jobDelayMax = typeof campaign.delayMax === 'number' ? campaign.delayMax : 10000;
+    const jobDelayMin = typeof campaign.delayMin === 'number' ? campaign.delayMin : DEFAULT_DELAY_MIN;
+    const jobDelayMax = typeof campaign.delayMax === 'number' ? campaign.delayMax : DEFAULT_DELAY_MAX;
     for (const chunk of chunks) {
       await whatsappQueue.add(
         { campaignId: campaignId.toString(), recipientIds: chunk, delayMin: jobDelayMin, delayMax: jobDelayMax },
@@ -170,7 +170,7 @@ async function update(campaignId, user, payload) {
     update.delayMin = payload.delayMin;
   }
   if (typeof payload.delayMax === 'number') {
-    const min = update.delayMin ?? campaign.delayMin ?? 4000;
+    const min = update.delayMin ?? campaign.delayMin ?? DEFAULT_DELAY_MIN;
     update.delayMax = Math.max(payload.delayMax, min + 500);
   }
   if (Object.keys(update).length === 0) return Campaign.findById(campaignId).lean();

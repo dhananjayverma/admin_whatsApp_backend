@@ -2,13 +2,14 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const jwt = require('jsonwebtoken');
 const { auth } = require('../middleware/auth');
 const { allowRoles } = require('../middleware/rbac');
 const waClient = require('../services/whatsappClientService');
+const { JWT_SECRET } = require('../config/env');
 
 const router = express.Router();
 
-// Uploads folder
 const uploadsDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
@@ -19,27 +20,103 @@ const storage = multer.diskStorage({
     cb(null, Date.now().toString(36) + Math.random().toString(36).slice(2) + ext);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 16 * 1024 * 1024 } }); // 16 MB max
+const upload = multer({ storage, limits: { fileSize: 16 * 1024 * 1024 } });
 
-// In-memory store for active direct-send jobs
 const activeSendJobs = new Map();
+
+// ── SSE auth — token passed as ?token= query param (EventSource can't set headers)
+function sseAuth(req, res, next) {
+  const token = req.query.token;
+  if (!token) return res.status(401).end();
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.sseUser = { id: decoded.userId, role: decoded.role };
+    next();
+  } catch {
+    res.status(401).end();
+  }
+}
+
+function sseHeaders(res) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering
+  res.flushHeaders();
+}
+
+function sseSend(res, data) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+// ── Admin SSE — real-time push for all admin accounts
+router.get('/events', sseAuth, (req, res) => {
+  if (req.sseUser.role !== 'admin') return res.status(403).end();
+
+  sseHeaders(res);
+
+  // Send current snapshot immediately
+  const accounts = waClient.getAllStatus().filter((a) => !a.clientId.startsWith('user_'));
+  sseSend(res, { type: 'snapshot', accounts });
+
+  // Keep-alive ping every 25s (proxies drop idle SSE after 30s)
+  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+
+  const onUpdate = ({ clientId }) => {
+    if (clientId.startsWith('user_')) return;
+    const accounts = waClient.getAllStatus().filter((a) => !a.clientId.startsWith('user_'));
+    sseSend(res, { type: 'snapshot', accounts });
+  };
+
+  waClient.waEvents.on('update', onUpdate);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    waClient.waEvents.off('update', onUpdate);
+  });
+});
+
+// ── Client SSE — real-time push for own session
+router.get('/my/events', sseAuth, (req, res) => {
+  const clientId = `user_${req.sseUser.id}`;
+
+  sseHeaders(res);
+
+  const getSession = () => {
+    const all = waClient.getAllStatus();
+    return all.find((a) => a.clientId === clientId) || null;
+  };
+
+  sseSend(res, { type: 'session', session: getSession() });
+
+  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+
+  const onUpdate = ({ clientId: updatedId }) => {
+    if (updatedId !== clientId) return;
+    sseSend(res, { type: 'session', session: getSession() });
+  };
+
+  waClient.waEvents.on('update', onUpdate);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    waClient.waEvents.off('update', onUpdate);
+  });
+});
 
 // ── Account management ────────────────────────────────────────────────────────
 
-// Admin: get all admin-managed accounts (excludes client user sessions)
 router.get('/accounts', auth, allowRoles('admin'), (req, res) => {
   const accounts = waClient.getAllStatus().filter((a) => !a.clientId.startsWith('user_'));
   res.json({ accounts });
 });
 
-// Backward-compat single status (admin accounts only)
 router.get('/status', auth, (req, res) => {
   const adminAccounts = waClient.getAllStatus().filter((a) => !a.clientId.startsWith('user_'));
   const first = adminAccounts[0];
   res.json(first ? { status: first.status, qr: first.qr } : { status: 'loading', qr: null });
 });
 
-// Admin: add new account
 router.post('/accounts', auth, allowRoles('admin'), async (req, res) => {
   try {
     const { label } = req.body || {};
@@ -50,7 +127,6 @@ router.post('/accounts', auth, allowRoles('admin'), async (req, res) => {
   }
 });
 
-// Admin: reconnect account (logout + fresh QR)
 router.post('/accounts/:clientId/reconnect', auth, allowRoles('admin'), async (req, res) => {
   try {
     await waClient.reconnectAccount(req.params.clientId);
@@ -60,7 +136,18 @@ router.post('/accounts/:clientId/reconnect', auth, allowRoles('admin'), async (r
   }
 });
 
-// Admin: update label/phone
+// Admin: request pairing code instead of QR
+router.post('/accounts/:clientId/pairing-code', auth, allowRoles('admin'), async (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).json({ message: 'Phone number required' });
+    const code = await waClient.requestPairingCode(req.params.clientId, phone);
+    res.json({ code });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
 router.patch('/accounts/:clientId', auth, allowRoles('admin'), async (req, res) => {
   try {
     await waClient.updateAccount(req.params.clientId, req.body);
@@ -70,7 +157,6 @@ router.patch('/accounts/:clientId', auth, allowRoles('admin'), async (req, res) 
   }
 });
 
-// Admin: remove account
 router.delete('/accounts/:clientId', auth, allowRoles('admin'), async (req, res) => {
   try {
     await waClient.removeAccount(req.params.clientId);
@@ -81,24 +167,16 @@ router.delete('/accounts/:clientId', auth, allowRoles('admin'), async (req, res)
 });
 
 // ── Client self-managed WhatsApp session ─────────────────────────────────────
-// Each client gets their own isolated session keyed by user_<userId>
 
-function clientSessionId(userId) {
-  return `user_${userId}`;
-}
-
-// GET /whatsapp/my — get own session status
 router.get('/my', auth, (req, res) => {
-  const clientId = clientSessionId(req.user.id);
-  const all = waClient.getAllStatus();
-  const session = all.find((a) => a.clientId === clientId);
-  res.json({ session: session || null });
+  const clientId = `user_${req.user.id}`;
+  const session = waClient.getAllStatus().find((a) => a.clientId === clientId) || null;
+  res.json({ session });
 });
 
-// POST /whatsapp/my/connect — start own WhatsApp session
 router.post('/my/connect', auth, async (req, res) => {
   try {
-    const clientId = clientSessionId(req.user.id);
+    const clientId = `user_${req.user.id}`;
     const label = `Client: ${req.user.email}`;
     const WhatsAppAccount = require('../models/WhatsAppAccount');
     await WhatsAppAccount.updateOne(
@@ -106,11 +184,8 @@ router.post('/my/connect', auth, async (req, res) => {
       { $setOnInsert: { clientId, label, phone: '' } },
       { upsert: true }
     );
-    const all = waClient.getAllStatus();
-    if (!all.find((a) => a.clientId === clientId)) {
-      // dynamically start the client
-      const wcs = require('../services/whatsappClientService');
-      wcs._startClientForUser(clientId, label);
+    if (!waClient.getAllStatus().find((a) => a.clientId === clientId)) {
+      waClient._startClientForUser(clientId, label);
     }
     res.json({ clientId });
   } catch (err) {
@@ -118,29 +193,36 @@ router.post('/my/connect', auth, async (req, res) => {
   }
 });
 
-// POST /whatsapp/my/reconnect — reconnect own session
 router.post('/my/reconnect', auth, async (req, res) => {
   try {
-    const clientId = clientSessionId(req.user.id);
-    await waClient.reconnectAccount(clientId);
+    await waClient.reconnectAccount(`user_${req.user.id}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// DELETE /whatsapp/my — remove own session
+// Client: request pairing code for own session
+router.post('/my/pairing-code', auth, async (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).json({ message: 'Phone number required' });
+    const code = await waClient.requestPairingCode(`user_${req.user.id}`, phone);
+    res.json({ code });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
 router.delete('/my', auth, async (req, res) => {
   try {
-    const clientId = clientSessionId(req.user.id);
-    await waClient.removeAccount(clientId);
+    await waClient.removeAccount(`user_${req.user.id}`);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// Backward-compat logout
 router.post('/logout', auth, allowRoles('admin'), async (req, res) => {
   try {
     const { clientId } = req.body || {};
@@ -163,14 +245,13 @@ router.post('/upload', auth, allowRoles('admin'), upload.single('file'), (req, r
   });
 });
 
-// Delete uploaded file
 router.delete('/upload/:fileId', auth, allowRoles('admin'), (req, res) => {
   const filePath = path.join(uploadsDir, req.params.fileId);
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   res.json({ ok: true });
 });
 
-// ── Bulk send (direct, runs in background) ────────────────────────────────────
+// ── Bulk send ─────────────────────────────────────────────────────────────────
 
 router.post('/send-bulk', auth, allowRoles('admin'), async (req, res) => {
   const { numbers, message, delayMs, fileId } = req.body || {};
@@ -214,9 +295,8 @@ router.post('/send-bulk', auth, allowRoles('admin'), async (req, res) => {
       if (i < phones.length - 1) await new Promise((r) => setTimeout(r, msgDelay));
     }
     job.status = 'done';
-    // Clean up uploaded file after job completes
     if (mediaPath && fs.existsSync(mediaPath)) {
-      setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch { /* ignore */ } }, 5000);
+      setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch {} }, 5000);
     }
     setTimeout(() => activeSendJobs.delete(jobId), 30 * 60 * 1000);
   })();

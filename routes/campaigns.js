@@ -1,13 +1,42 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const Campaign = require('../models/Campaign');
 const Recipient = require('../models/Recipient');
 const campaignService = require('../services/campaignService');
+const campaignEvents = require('../services/campaignEvents');
 const { validateNumbers } = require('../utils/validateNumbers');
 const { auth } = require('../middleware/auth');
 const { allowRoles } = require('../middleware/rbac');
 const { validateCampaignBody, validateMongoId } = require('../middleware/validate');
+const { JWT_SECRET } = require('../config/env');
 
 const router = express.Router();
+
+// SSE auth — token in query param (EventSource can't set headers)
+function sseAuth(req, res, next) {
+  const token = req.query.token;
+  if (!token) return res.status(401).end();
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.sseUser = { id: decoded.userId, role: decoded.role };
+    next();
+  } catch { res.status(401).end(); }
+}
+
+// Real-time campaign event stream — campaign_paused, campaign_completed, wa_provisioning
+router.get('/events', sseAuth, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+  const handler = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  campaignEvents.on('update', handler);
+  req.on('close', () => { clearInterval(ping); campaignEvents.off('update', handler); });
+});
 
 router.post('/validate-numbers', auth, allowRoles('admin', 'reseller', 'client'), (req, res) => {
   try {

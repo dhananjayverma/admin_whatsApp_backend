@@ -1,197 +1,83 @@
-const { Client, LocalAuth, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { EventEmitter } = require('events');
 const logger = require('../utils/logger');
 
-// IS_CLOUD = true when running on Render/container (Linux, no display)
-const IS_CLOUD = process.platform !== 'win32';
-const DATA_PATH = IS_CLOUD ? os.tmpdir() : path.join(__dirname, '..');
-
-// Resolve Chrome executable once at startup — explicit path prevents "Chrome not found" loops
-function _resolveChromePath() {
-  // 1. Explicit override via env (Render dashboard or .env)
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
-  // 2. Use puppeteer's own resolution (reads .puppeteerrc.cjs / PUPPETEER_CACHE_DIR)
-  try {
-    const p = require('puppeteer').executablePath();
-    if (p && fs.existsSync(p)) return p;
-  } catch {}
-  // 3. Common Linux paths (Render / cloud)
-  const linuxPaths = [
-    '/usr/bin/google-chrome', '/usr/bin/chromium-browser', '/usr/bin/chromium',
-    '/usr/bin/google-chrome-stable',
-  ];
-  for (const p of linuxPaths) { if (fs.existsSync(p)) return p; }
-  return null;
-}
-const CHROME_PATH = _resolveChromePath();
-if (CHROME_PATH) {
-  logger.info(`[WA] Chrome found: ${CHROME_PATH}`);
-} else {
-  logger.error('[WA] Chrome NOT found — run: npx puppeteer browsers install chrome');
+// Baileys is ESM-only — load once and cache
+let _baileys = null;
+async function _getBaileys() {
+  if (!_baileys) _baileys = await import('@whiskeysockets/baileys');
+  return _baileys;
 }
 
-// LocalAuth stores sessions at <dataPath>/.wwebjs_auth/session-<clientId>/
-// dataPath must be the PARENT of .wwebjs_auth (the backend/ folder)
-const AUTH_DIR  = path.join(__dirname, '../.wwebjs_auth');
-const CACHE_DIR = path.join(__dirname, '../.wwebjs_cache');
+// Use persistent disk path on cloud (set BAILEYS_AUTH_PATH in env), else local folder
+const AUTH_DIR = process.env.BAILEYS_AUTH_PATH || path.join(__dirname, '../.baileys_auth');
 
-// Ensure cache dir exists so webVersionCache:local works on first run (incl. Render)
-if (!fs.existsSync(CACHE_DIR)) { try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch {} }
-
-// ── MongoStore (cloud only) ───────────────────────────────────────────────────
-let _mongoStore = null;
-function _getMongoStore() {
-  if (!_mongoStore) {
-    const { MongoStore } = require('wwebjs-mongo');
-    const mongoose = require('mongoose');
-    _mongoStore = new MongoStore({ mongoose });
-  }
-  return _mongoStore;
+if (!fs.existsSync(AUTH_DIR)) {
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
 }
 
-// ── Chrome / lock helpers ─────────────────────────────────────────────────────
-
-function _spinWait(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {}
+// Silent pino logger so Baileys doesn't flood console
+let _pino;
+try {
+  _pino = require('pino')({ level: 'silent' });
+} catch {
+  _pino = { level: 'silent', child: () => _pino, trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, fatal: () => {} };
 }
 
-// Kill every Chrome / Chromium process on this machine
-function _killAllChrome() {
-  if (IS_CLOUD) {
-    // Linux / Render: use pkill
-    try { execSync('pkill -f chrome',   { stdio: 'ignore' }); } catch {}
-    try { execSync('pkill -f chromium', { stdio: 'ignore' }); } catch {}
-  } else {
-    try { execSync('taskkill /IM chrome.exe /F /T',   { stdio: 'ignore' }); } catch {}
-    try { execSync('taskkill /IM chromium.exe /F /T', { stdio: 'ignore' }); } catch {}
-  }
-  logger.info('[WA] Killed all Chrome/Chromium processes');
-}
+// Emits 'update' on every state change — consumed by SSE endpoints
+const waEvents = new EventEmitter();
+waEvents.setMaxListeners(200);
 
-// Recursively delete every SingletonLock file under a directory tree
-function _deleteLockFiles(dir) {
-  if (!fs.existsSync(dir)) return;
-  try {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        _deleteLockFiles(full);
-      } else if (entry.name === 'SingletonLock') {
-        try { fs.unlinkSync(full); } catch {}
-      }
-    }
-  } catch {}
-}
-
-// Full startup cleanup: kill Chrome then wipe every lock in .wwebjs_auth tree
-async function _fullCleanup() {
-  _killAllChrome();
-  await new Promise((r) => setTimeout(r, 800)); // async wait — does NOT block event loop
-  _deleteLockFiles(AUTH_DIR);
-  if (IS_CLOUD) _deleteLockFiles(os.tmpdir()); // also clean tmpdir on cloud
-  logger.info('[WA] Startup cleanup complete');
-}
-
-// Per-session lock clear before creating a client
-function _clearSessionLock(clientId) {
-  // On cloud the session lives in tmpdir, locally in AUTH_DIR
-  const sessionRoot = IS_CLOUD ? os.tmpdir() : AUTH_DIR;
-  const lockPath    = path.join(sessionRoot, `session-${clientId}`, 'SingletonLock');
-  if (!fs.existsSync(lockPath)) return;
-
-  _killAllChrome();
-  if (IS_CLOUD) {
-    // On Linux pkill is async-ish; just try to delete immediately
-    for (let i = 0; i < 5; i++) {
-      try { fs.unlinkSync(lockPath); break; } catch { _spinWait(300); }
-    }
-  } else {
-    _spinWait(1500);
-    for (let i = 0; i < 10; i++) {
-      if (!fs.existsSync(lockPath)) break;
-      try { fs.unlinkSync(lockPath); break; } catch { _spinWait(200); }
-    }
-  }
-
-  if (!fs.existsSync(lockPath)) {
-    logger.info(`[WA:${clientId}] Cleared stale session lock`);
-  } else {
-    logger.warn(`[WA:${clientId}] Could not remove lock — Chrome may still hold it`);
-  }
-}
-
-// ── Session map ───────────────────────────────────────────────────────────────
-const clients     = new Map();   // clientId → state
-const _restarting = new Set();   // clientIds currently in restart cycle
+const clients     = new Map();
+const _restarting = new Set();
 let rrIndex = 0;
 
-const PUPPETEER_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-accelerated-2d-canvas',
-  '--no-first-run',
-  '--no-zygote',
-  '--disable-gpu',
-  '--disable-software-rasterizer',
-  '--disable-extensions',
-  '--disable-sync',
-  '--disable-translate',
-  '--disable-default-apps',
-  '--disable-hang-monitor',
-  '--disable-client-side-phishing-detection',
-  '--disable-popup-blocking',
-  '--disable-prompt-on-repost',
-  '--metrics-recording-only',
-  '--mute-audio',
-  '--no-default-browser-check',
-  '--autoplay-policy=no-user-gesture-required',
-  // NOTE: --disable-background-networking REMOVED — WhatsApp needs background network access
-  // NOTE: --single-process REMOVED — it causes Chrome to crash on scan in cloud environments
-  //       --no-zygote (above) already reduces process count safely
-];
-
-// ── Private ───────────────────────────────────────────────────────────────────
-
-function _restartClient(clientId) {
-  const state = clients.get(clientId);
-  if (!state || state.status === 'ready' || _restarting.has(clientId)) return;
-  if (state.restartCount >= 10) {
-    logger.error(`[WA:${clientId}] Max restart attempts reached. Use reconnect to reset.`);
-    state.status = 'disconnected';
-    return;
-  }
-
-  _restarting.add(clientId);
-  logger.info(`[WA:${clientId}] Auto-restarting (attempt ${state.restartCount + 1})...`);
-  const { label, phone, restartCount } = state;
-
-  try { state.client?.removeAllListeners(); } catch {}
-
-  const doRestart = () => {
-    _clearSessionLock(clientId);
-    clients.delete(clientId);
-    _restarting.delete(clientId);
-    _createClient(clientId, label, phone, restartCount + 1);
-  };
-
-  if (state.launched) {
-    state.client?.destroy().catch(() => {}).then(() => setTimeout(doRestart, 2000));
-  } else {
-    setTimeout(doRestart, 3000);
-  }
+function _sessionDir(clientId) {
+  return path.join(AUTH_DIR, `session-${clientId}`);
 }
 
-function _createClient(clientId, label, phone, restartCount = 0) {
+function _emit(clientId) {
+  waEvents.emit('update', { clientId, state: clients.get(clientId) || null });
+}
+
+function _clearAuthState(clientId) {
+  const dir = _sessionDir(clientId);
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function _getMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const map = {
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+    '.gif': 'image/gif',  '.webp': 'image/webp',  '.mp4': 'video/mp4',
+    '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg',   '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xls': 'application/vnd.ms-excel',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+function _buildMediaContent(filePath, caption) {
+  const mime = _getMimeType(filePath);
+  const data = fs.readFileSync(filePath);
+  if (mime.startsWith('image/')) return { image: data, mimetype: mime, caption: caption || '' };
+  if (mime.startsWith('video/')) return { video: data, mimetype: mime, caption: caption || '' };
+  if (mime.startsWith('audio/')) return { audio: data, mimetype: mime, ptt: false };
+  return { document: data, mimetype: mime, fileName: path.basename(filePath), caption: caption || '' };
+}
+
+async function _createClient(clientId, label, phone, restartCount = 0) {
   if (clients.has(clientId)) return;
 
-  // Always clear any stale lock before launching
-  _clearSessionLock(clientId);
+  const sessionDir = _sessionDir(clientId);
+  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
   const state = {
     clientId,
@@ -199,107 +85,105 @@ function _createClient(clientId, label, phone, restartCount = 0) {
     phone:        phone || '',
     status:       'loading',
     qr:           null,
-    client:       null,
+    pairingCode:  null,
+    sock:         null,
     restartCount,
     launched:     false,
   };
   clients.set(clientId, state);
+  _emit(clientId);
 
-  // Use RemoteAuth (MongoDB) only when explicitly configured via env
-  const USE_REMOTE_AUTH = !!process.env.MONGODB_SESSION_STORE;
-  const authStrategy = USE_REMOTE_AUTH
-    ? new RemoteAuth({
-        clientId,
-        store:                _getMongoStore(),
-        backupSyncIntervalMs: 300000,
-        dataPath:             DATA_PATH,
-      })
-    : new LocalAuth({
-        clientId,
-        dataPath: path.join(__dirname, '..'),  // sessions → backend/.wwebjs_auth/session-<id>/
-      });
+  try {
+    const { default: makeWASocket, useMultiFileAuthState, DisconnectReason: DR, fetchLatestBaileysVersion } = await _getBaileys();
 
-  if (!CHROME_PATH) {
-    logger.error(`[WA:${clientId}] Cannot start — Chrome not installed. Run: npx puppeteer browsers install chrome`);
-    state.status = 'disconnected';
-    clients.delete(clientId);
-    return;
-  }
-  const puppeteerConfig = { headless: true, args: PUPPETEER_ARGS, executablePath: CHROME_PATH };
+    const { state: authState, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
-  const c = new Client({
-    authStrategy,
-    puppeteer: puppeteerConfig,
-    webVersionCache: { type: 'local', path: path.join(__dirname, '../.wwebjs_cache') },
-  });
-  state.client = c;
+    const sock = makeWASocket({
+      version,
+      auth:               authState,
+      printQRInTerminal:  false,
+      logger:             _pino,
+      browser:            ['Chrome (Linux)', 'Chrome', '120.0.0.0'],
+      syncFullHistory:    false,
+      markOnlineOnConnect: false,
+    });
+    state.sock = sock;
 
-  c.on('qr', async (qr) => {
-    state.launched = true;
-    state.status   = 'qr';
-    try { state.qr = await qrcode.toDataURL(qr); } catch { state.qr = null; }
-    logger.info(`[WA:${clientId}] QR ready — scan now`);
-  });
+    sock.ev.on('creds.update', saveCreds);
 
-  c.on('authenticated', () => {
-    // Set ready immediately on scan so the UI responds instantly — don't wait for 'ready'
-    // which fires 30-60s later after WhatsApp loads all chats
-    state.launched     = true;
-    state.status       = 'ready';
-    state.qr           = null;
-    state.restartCount = 0;
-    logger.info(`[WA:${clientId}] Authenticated — connected`);
-    if (clientId.startsWith('vn_')) {
-      const VirtualNumber = require('../models/VirtualNumber');
-      VirtualNumber.updateOne(
-        { _id: clientId.replace('vn_', '') },
-        { $set: { hasWhatsApp: true } }
-      ).catch(() => {});
-    }
-  });
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+      if (qr) {
+        state.launched = true;
+        state.status   = 'qr';
+        try { state.qr = await qrcode.toDataURL(qr); } catch { state.qr = null; }
+        logger.info(`[WA:${clientId}] QR ready`);
+        _emit(clientId);
+      }
 
-  c.on('ready', () => {
-    state.launched     = true;
-    state.status       = 'ready';
-    state.qr           = null;
-    state.restartCount = 0;
-    logger.info(`[WA:${clientId}] Ready`);
-  });
+      if (connection === 'open') {
+        state.launched     = true;
+        state.status       = 'ready';
+        state.qr           = null;
+        state.pairingCode  = null;
+        state.restartCount = 0;
+        logger.info(`[WA:${clientId}] Connected`);
+        _emit(clientId);
 
-  c.on('remote_session_saved', () => {
-    logger.info(`[WA:${clientId}] Session saved to MongoDB`);
-  });
+        if (clientId.startsWith('vn_')) {
+          const VirtualNumber = require('../models/VirtualNumber');
+          VirtualNumber.updateOne(
+            { _id: clientId.replace('vn_', '') },
+            { $set: { hasWhatsApp: true } }
+          ).catch(() => {});
+        }
+      }
 
-  c.on('auth_failure', () => {
-    state.status = 'disconnected';
-    logger.error(`[WA:${clientId}] Auth failure`);
-    setTimeout(() => _restartClient(clientId), 15000);
-  });
+      if (connection === 'close') {
+        const statusCode    = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut     = statusCode === DR.loggedOut;
+        const replaced      = statusCode === DR.connectionReplaced;
 
-  c.on('disconnected', (reason) => {
-    state.status = 'disconnected';
-    state.qr     = null;
-    logger.warn(`[WA:${clientId}] Disconnected: ${reason}`);
-    setTimeout(() => _restartClient(clientId), 10000);
-  });
+        state.status      = 'disconnected';
+        state.qr          = null;
+        state.pairingCode = null;
+        logger.warn(`[WA:${clientId}] Closed (code ${statusCode})`);
+        _emit(clientId);
 
-  c.initialize().catch((err) => {
+        if (loggedOut || replaced) {
+          // Clear auth so next start shows a fresh QR
+          _clearAuthState(clientId);
+          logger.info(`[WA:${clientId}] Logged out — auth cleared`);
+        }
+
+        clients.delete(clientId);
+        _restarting.delete(clientId);
+
+        if (restartCount < 10) {
+          const delay = loggedOut ? 2000 : 10000;
+          setTimeout(() => _createClient(clientId, label, phone, restartCount + 1), delay);
+        } else {
+          logger.error(`[WA:${clientId}] Max restarts reached — call reconnect to reset`);
+        }
+      }
+    });
+
+  } catch (err) {
     state.status = 'disconnected';
     logger.error(`[WA:${clientId}] Init error: ${err.message}`);
-    if (err.message?.includes('already running')) {
-      // Force-clear everything so next retry succeeds
-      _killAllChrome();
-      _deleteLockFiles(AUTH_DIR);
+    _emit(clientId);
+    clients.delete(clientId);
+    if (restartCount < 10) {
+      setTimeout(() => _createClient(clientId, label, phone, restartCount + 1), 15000);
     }
-    setTimeout(() => _restartClient(clientId), 15000);
-  });
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 async function initAll() {
   const WhatsAppAccount = require('../models/WhatsAppAccount');
-  let accounts = await WhatsAppAccount.find().lean();
+  const accounts = await WhatsAppAccount.find().lean();
 
   const adminAccounts  = accounts.filter((a) => !a.clientId.startsWith('user_'));
   const clientAccounts = accounts.filter((a) =>  a.clientId.startsWith('user_'));
@@ -310,20 +194,15 @@ async function initAll() {
     logger.info('[WA] Created default account');
   }
 
-  await _fullCleanup();
-
-  logger.info(`[WA] Using ${process.env.MONGODB_SESSION_STORE ? 'RemoteAuth (MongoDB)' : 'LocalAuth'} strategy`);
-
   for (let i = 0; i < adminAccounts.length; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, 4000));
-    _createClient(adminAccounts[i].clientId, adminAccounts[i].label, adminAccounts[i].phone);
+    if (i > 0) await new Promise((r) => setTimeout(r, 2000));
+    await _createClient(adminAccounts[i].clientId, adminAccounts[i].label, adminAccounts[i].phone);
   }
   logger.info(`[WA] Initialized ${adminAccounts.length} admin account(s)`);
 
   if (clientAccounts.length > 0) {
-    const offset = adminAccounts.length * 4000 + 4000;
     clientAccounts.forEach((a, i) => {
-      setTimeout(() => _createClient(a.clientId, a.label, a.phone), offset + i * 4000);
+      setTimeout(() => _createClient(a.clientId, a.label, a.phone), (i + 1) * 2000);
     });
     logger.info(`[WA] Scheduling ${clientAccounts.length} user session(s)`);
   }
@@ -334,41 +213,47 @@ async function addAccount(label) {
   const clientId     = 'wa_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const accountLabel = label || `Account ${clients.size + 1}`;
   await WhatsAppAccount.create({ clientId, label: accountLabel });
-  _createClient(clientId, accountLabel, '');
+  await _createClient(clientId, accountLabel, '');
   return clientId;
 }
 
 async function removeAccount(clientId) {
   const WhatsAppAccount = require('../models/WhatsAppAccount');
   const state = clients.get(clientId);
-  if (state) {
-    try { state.client?.removeAllListeners(); } catch {}
-    if (state.launched) {
-      await state.client?.logout().catch(() => {});
-      await state.client?.destroy().catch(() => {});
-    }
-    clients.delete(clientId);
+  if (state?.sock) {
+    try {
+      state.sock.ev.removeAllListeners();
+      if (state.status === 'ready') {
+        await state.sock.logout().catch(() => {});
+      } else {
+        state.sock.end(undefined);
+      }
+    } catch {}
   }
+  clients.delete(clientId);
+  _emit(clientId);
   await WhatsAppAccount.deleteOne({ clientId });
 }
 
 async function reconnectAccount(clientId) {
   const WhatsAppAccount = require('../models/WhatsAppAccount');
-  const state = clients.get(clientId);
   const doc   = await WhatsAppAccount.findOne({ clientId }).lean();
-  if (!doc) throw new Error(`Account ${clientId} not found in database`);
-  if (state) {
-    try { state.client?.removeAllListeners(); } catch {}
-    if (state.launched && state.status === 'ready') {
-      // Only logout when actually connected — logout() throws when in QR state
-      await state.client?.logout().catch(() => {});
-    }
-    await state.client?.destroy().catch(() => {});
-    clients.delete(clientId);
-    _clearSessionLock(clientId);
-    await new Promise((r) => setTimeout(r, IS_CLOUD ? 3000 : 2000));
+  if (!doc) throw new Error(`Account ${clientId} not found`);
+
+  const state = clients.get(clientId);
+  if (state?.sock) {
+    try {
+      state.sock.ev.removeAllListeners();
+      state.sock.end(undefined);
+    } catch {}
   }
-  _createClient(clientId, doc.label || '', doc.phone || '', 0);
+  clients.delete(clientId);
+  _restarting.delete(clientId);
+
+  // Clear auth so a fresh QR is shown
+  _clearAuthState(clientId);
+
+  await _createClient(clientId, doc.label || '', doc.phone || '', 0);
 }
 
 async function updateAccount(clientId, { label, phone } = {}) {
@@ -379,12 +264,34 @@ async function updateAccount(clientId, { label, phone } = {}) {
   if (label !== undefined) { update.label = label; state.label = label; }
   if (phone  !== undefined) { update.phone  = phone;  state.phone  = phone;  }
   await WhatsAppAccount.updateOne({ clientId }, update);
+  _emit(clientId);
 }
 
 function getAllStatus() {
-  return Array.from(clients.values()).map(({ clientId, label, phone, status, qr }) => ({
-    clientId, label, phone, status, qr,
+  return Array.from(clients.values()).map(({ clientId, label, phone, status, qr, pairingCode }) => ({
+    clientId, label, phone, status, qr, pairingCode,
   }));
+}
+
+async function requestPairingCode(clientId, phone) {
+  const state = clients.get(clientId);
+  if (!state || !state.sock) throw new Error('Session not started yet — try again in a moment');
+  if (state.status === 'ready')  throw new Error('Already connected');
+
+  const cleanPhone = phone.replace(/\D/g, '');
+  if (!cleanPhone || cleanPhone.length < 7) throw new Error('Invalid phone number');
+
+  try {
+    const code = await state.sock.requestPairingCode(cleanPhone);
+    state.pairingCode = code;
+    state.status      = 'pairing';
+    state.qr          = null;
+    logger.info(`[WA:${clientId}] Pairing code sent to ${cleanPhone}`);
+    _emit(clientId);
+    return code;
+  } catch (err) {
+    throw new Error(`Pairing code failed: ${err.message}`);
+  }
 }
 
 function getStatus() {
@@ -392,31 +299,29 @@ function getStatus() {
   return first ? { status: first.status, qr: first.qr } : { status: 'loading', qr: null };
 }
 
+async function _doSend(sock, phone, message, mediaPath) {
+  const jid = phone.replace(/\D/g, '') + '@s.whatsapp.net';
+  if (mediaPath && fs.existsSync(mediaPath)) {
+    await sock.sendMessage(jid, _buildMediaContent(mediaPath, message));
+  } else {
+    await sock.sendMessage(jid, { text: message });
+  }
+}
+
 async function sendViaClientId(clientId, phone, message, mediaPath) {
   const state = clients.get(clientId);
-  if (!state || state.status !== 'ready' || !state.client)
+  if (!state || state.status !== 'ready' || !state.sock)
     throw new Error(`WhatsApp account ${clientId} is not ready (status: ${state?.status || 'not found'})`);
+  await _doSend(state.sock, phone, message, mediaPath);
+}
 
-  const chatId = phone.replace(/\D/g, '') + '@c.us';
-  try {
-    if (mediaPath && fs.existsSync(mediaPath)) {
-      const media = MessageMedia.fromFilePath(mediaPath);
-      await state.client.sendMessage(chatId, media, { caption: message || '' });
-    } else {
-      await state.client.sendMessage(chatId, message);
-    }
-  } catch (err) {
-    const isCrash = err.message && (
-      err.message.includes('Target closed') || err.message.includes('Protocol error') ||
-      err.message.includes('Session closed') || err.name === 'TargetCloseError'
-    );
-    if (isCrash) {
-      state.status = 'disconnected'; state.qr = null;
-      logger.warn(`[WA:${clientId}] Client crashed during send — restarting`);
-      setTimeout(() => _restartClient(clientId), 5000);
-    }
-    throw err;
-  }
+async function sendMessage(phone, message, mediaPath) {
+  const ready = Array.from(clients.values()).filter((s) => s.status === 'ready' && s.sock);
+  if (ready.length === 0) throw new Error('No WhatsApp account connected. Please scan the QR code.');
+
+  const idx   = rrIndex % ready.length;
+  rrIndex     = (rrIndex + 1) % Math.max(ready.length, 1);
+  await _doSend(ready[idx].sock, phone, message, mediaPath);
 }
 
 async function provisionWhatsApp(virtualNumberId, phoneLabel) {
@@ -429,43 +334,13 @@ async function provisionWhatsApp(virtualNumberId, phoneLabel) {
     { $setOnInsert: { clientId, label, phone: phoneLabel || '' } },
     { upsert: true }
   );
-  if (!clients.has(clientId)) _createClient(clientId, label, phoneLabel || '');
+  if (!clients.has(clientId)) await _createClient(clientId, label, phoneLabel || '');
   await VirtualNumber.updateOne(
     { _id: virtualNumberId },
     { $set: { whatsappClientId: clientId, hasWhatsApp: false } }
   );
-  logger.info(`[WA] Provisioned session for ${phoneLabel}`, { clientId });
+  logger.info(`[WA] Provisioned ${phoneLabel}`, { clientId });
   return clientId;
-}
-
-async function sendMessage(phone, message, mediaPath) {
-  const ready = Array.from(clients.values()).filter((s) => s.status === 'ready' && s.client);
-  if (ready.length === 0) throw new Error('No WhatsApp account connected. Please scan the QR code.');
-
-  const idx    = rrIndex % ready.length;
-  rrIndex      = (rrIndex + 1) % Math.max(ready.length, 1);
-  const state  = ready[idx];
-  const chatId = phone.replace(/\D/g, '') + '@c.us';
-
-  try {
-    if (mediaPath && fs.existsSync(mediaPath)) {
-      const media = MessageMedia.fromFilePath(mediaPath);
-      await state.client.sendMessage(chatId, media, { caption: message || '' });
-    } else {
-      await state.client.sendMessage(chatId, message);
-    }
-  } catch (err) {
-    const isCrash = err.message && (
-      err.message.includes('Target closed') || err.message.includes('Protocol error') ||
-      err.message.includes('Session closed') || err.name === 'TargetCloseError'
-    );
-    if (isCrash) {
-      state.status = 'disconnected'; state.qr = null;
-      logger.warn(`[WA:${state.clientId}] Client crashed during send — restarting`);
-      setTimeout(() => _restartClient(state.clientId), 5000);
-    }
-    throw err;
-  }
 }
 
 function _startClientForUser(clientId, label) {
@@ -475,5 +350,5 @@ function _startClientForUser(clientId, label) {
 module.exports = {
   initAll, addAccount, removeAccount, reconnectAccount, updateAccount,
   getAllStatus, getStatus, sendMessage, sendViaClientId, provisionWhatsApp,
-  _startClientForUser,
+  requestPairingCode, _startClientForUser, waEvents,
 };

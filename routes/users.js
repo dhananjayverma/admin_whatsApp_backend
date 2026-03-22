@@ -1,16 +1,15 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
-const { auth } = require('../middleware/auth');
 const { allowRoles } = require('../middleware/rbac');
 
 const router = express.Router();
 
-router.get('/me', auth, (req, res) => {
+router.get('/me', (req, res) => {
   res.json({ user: req.user });
 });
 
-router.get('/', auth, allowRoles('admin', 'reseller'), async (req, res) => {
+router.get('/', allowRoles('admin', 'reseller'), async (req, res) => {
   try {
     const { role, resellerId } = req.query;
     const filter = {};
@@ -27,9 +26,7 @@ router.get('/', auth, allowRoles('admin', 'reseller'), async (req, res) => {
   }
 });
 
-// Admin: set which sections are enabled for a client or reseller
-// sections = null (all access) or array of section keys
-router.put('/:id/sections', auth, allowRoles('admin'), async (req, res) => {
+router.put('/:id/sections', allowRoles('admin'), async (req, res) => {
   try {
     const { sections } = req.body;
     const enabledSections = Array.isArray(sections) ? sections : null;
@@ -45,8 +42,7 @@ router.put('/:id/sections', auth, allowRoles('admin'), async (req, res) => {
   }
 });
 
-// Admin: toggle active/inactive status
-router.patch('/:id/toggle-active', auth, allowRoles('admin'), async (req, res) => {
+router.patch('/:id/toggle-active', allowRoles('admin'), async (req, res) => {
   try {
     const u = await User.findById(req.params.id).select('-passwordHash');
     if (!u) return res.status(404).json({ message: 'User not found' });
@@ -59,8 +55,7 @@ router.patch('/:id/toggle-active', auth, allowRoles('admin'), async (req, res) =
   }
 });
 
-// Admin: update user (password reset / email)
-router.patch('/:id', auth, allowRoles('admin'), async (req, res) => {
+router.patch('/:id', allowRoles('admin'), async (req, res) => {
   try {
     const { password, email } = req.body;
     const update = {};

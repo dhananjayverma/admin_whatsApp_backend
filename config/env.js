@@ -74,6 +74,8 @@ const CHUNK_SIZE = requiredInt('CHUNK_SIZE', 1, 100000);
 const COOLDOWN_SECONDS = requiredInt('COOLDOWN_SECONDS', 1, 86400);
 const COST_PER_MESSAGE = requiredFloat('COST_PER_MESSAGE', 0);
 const MAX_MESSAGES_PER_NUMBER_PER_DAY = requiredInt('MAX_MESSAGES_PER_NUMBER_PER_DAY', 1, 100000);
+const DEFAULT_DELAY_MIN = process.env.DEFAULT_DELAY_MIN ? parseInt(process.env.DEFAULT_DELAY_MIN, 10) : 80000;
+const DEFAULT_DELAY_MAX = process.env.DEFAULT_DELAY_MAX ? parseInt(process.env.DEFAULT_DELAY_MAX, 10) : 120000;
 
 const isProduction = NODE_ENV === 'production';
 const REDIS_ENABLED_BOOL = REDIS_ENABLED !== '0' && REDIS_ENABLED !== 'false';
@@ -110,5 +112,7 @@ module.exports = {
   COOLDOWN_SECONDS,
   COST_PER_MESSAGE,
   MAX_MESSAGES_PER_NUMBER_PER_DAY,
+  DEFAULT_DELAY_MIN,
+  DEFAULT_DELAY_MAX,
   ALLOWED_ORIGINS: ALLOWED_ORIGINS ?? [],
 };

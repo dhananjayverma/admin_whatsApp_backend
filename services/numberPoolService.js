@@ -149,17 +149,37 @@ async function areAllNumbersExhausted() {
   return true;
 }
 
-async function getNextNumber() {
+/**
+ * Returns the next available virtual number for sending.
+ * @param {Set<string>} [readyClientIds] — when provided, only returns numbers whose
+ *   whatsappClientId is in this set (ready WA session) OR numbers with no session yet
+ *   (empty/null clientId — so they can be auto-provisioned). Numbers with a provisioned
+ *   but not-yet-ready session are excluded to avoid wasting daily quota on skipped numbers.
+ */
+async function getNextNumber(readyClientIds = null) {
   await autoUnblockStaleNumbers();
   await resetMessagesTodayIfNewDay();
 
-  const numbers = await VirtualNumber.find({
+  const query = {
     status: 'active',
     $or: [
       { messagesToday: { $lt: MAX_MESSAGES_PER_NUMBER_PER_DAY } },
       { messagesToday: null },
     ],
-  })
+  };
+
+  // Pre-filter to only ready-session or unprovisioned numbers (avoids quota waste)
+  if (readyClientIds && readyClientIds.size > 0) {
+    query.$and = [{
+      $or: [
+        { whatsappClientId: { $in: Array.from(readyClientIds) } },
+        { whatsappClientId: '' },
+        { whatsappClientId: null },
+      ],
+    }];
+  }
+
+  const numbers = await VirtualNumber.find(query)
     .sort({ lastUsedAt: 1 })
     .limit(50)
     .lean();
