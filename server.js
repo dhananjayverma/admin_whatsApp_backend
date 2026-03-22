@@ -28,17 +28,17 @@ process.on('uncaughtException', (err) => {
 async function start() {
   await connectDB();
 
-  // Initialize all WhatsApp accounts from DB
-  const waClient = require('./services/whatsappClientService');
-  await waClient.initAll();
-
-  // Start Bull queue worker in the same process
-  const { initWorker } = require('./workers/whatsappWorker');
-  initWorker();
-
+  // Bind port FIRST — Render requires a port to be open within ~60s of startup
   app.listen(PORT, () => {
     console.log(`API listening on port ${PORT}`);
   });
+
+  // Initialize WhatsApp and worker AFTER port is bound (runs in background)
+  const waClient = require('./services/whatsappClientService');
+  waClient.initAll().catch((err) => console.error('[WA] initAll error:', err));
+
+  const { initWorker } = require('./workers/whatsappWorker');
+  initWorker();
 }
 
 start().catch((err) => {
