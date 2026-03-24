@@ -54,4 +54,16 @@ async function getHistory(userId, options = {}) {
   return { list, total };
 }
 
-module.exports = { deduct, add, getHistory };
+async function getHistoryAll(options = {}) {
+  const { limit = 50, skip = 0 } = options;
+  const list = await CreditTransaction.find({})
+    .populate('userId', 'email role')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean();
+  const total = await CreditTransaction.countDocuments({});
+  return { list, total };
+}
+
+module.exports = { deduct, add, getHistory, getHistoryAll };

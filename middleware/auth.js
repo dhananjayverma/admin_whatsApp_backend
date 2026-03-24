@@ -14,6 +14,9 @@ async function auth(req, res, next) {
     if (!user) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
+    if (!user.isActive) {
+      return res.status(401).json({ message: 'Account is deactivated' });
+    }
     req.user = user;
     next();
   } catch (err) {

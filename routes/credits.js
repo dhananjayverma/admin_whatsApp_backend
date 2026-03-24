@@ -32,7 +32,19 @@ router.post('/purchase', auth, allowRoles('admin', 'reseller'), validateCreditPu
 
 router.get('/history', auth, async (req, res) => {
   try {
-    const userId = req.query.userId || req.user._id.toString();
+    const requestedUserId = req.query.userId;
+    const paging = {
+      limit: parseInt(req.query.limit, 10) || 50,
+      skip: parseInt(req.query.skip, 10) || 0,
+    };
+
+    // Admin with no userId filter → return all transactions across all users
+    if (req.user.role === 'admin' && !requestedUserId) {
+      const { list, total } = await creditService.getHistoryAll(paging);
+      return res.json({ list, total });
+    }
+
+    const userId = requestedUserId || req.user._id.toString();
     if (req.user.role === 'client' && userId !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Forbidden' });
     }
@@ -42,10 +54,7 @@ router.get('/history', auth, async (req, res) => {
         return res.status(403).json({ message: 'Forbidden' });
       }
     }
-    const { list, total } = await creditService.getHistory(userId, {
-      limit: parseInt(req.query.limit, 10) || 50,
-      skip: parseInt(req.query.skip, 10) || 0,
-    });
+    const { list, total } = await creditService.getHistory(userId, paging);
     res.json({ list, total });
   } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
